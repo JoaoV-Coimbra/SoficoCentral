@@ -1,0 +1,1375 @@
+import {
+  Download,
+  Eye,
+  FileArchive,
+  FileText,
+  Filter,
+  Mail,
+  Pencil,
+  Plus,
+  Search,
+  Sparkles,
+  Trash2,
+  UploadCloud,
+  X,
+} from "lucide-react";
+import React from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { supabase } from "./supabaseClient";
+
+const STORAGE_KEY = "fi-sofico-cases";
+
+// Tipos centrais do fluxo: cliente, administradora, operador e registros compartilhados.
+type RecordType = "client" | "administrator";
+type ActiveTab = "client" | "administrator" | "operator";
+type Status = "Novo" | "Em análise" | "Pendente" | "Concluído" | "Cancelado";
+
+type Attachment = {
+  id: string;
+  name: string;
+  type: string;
+  size: number;
+  dataUrl: string;
+};
+
+type SolicitationRecord = {
+  id: string;
+  protocol: string;
+  type: RecordType;
+  name: string;
+  administrator: string;
+  email: string;
+  phone: string;
+  condominium: string;
+  complement: string;
+  area: string;
+  reason: string;
+  description: string;
+  status: Status;
+  attachments: Attachment[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+type SolicitationForm = Omit<SolicitationRecord, "createdAt" | "updatedAt"> & {
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+const initialForm: SolicitationForm = {
+  id: "",
+  protocol: "",
+  type: "administrator",
+  name: "",
+  administrator: "",
+  email: "",
+  phone: "",
+  condominium: "",
+  complement: "",
+  area: "",
+  reason: "",
+  description: "",
+  status: "Novo",
+  attachments: [],
+};
+
+const administrators = ["Habitacional", "Semog", "Controlar", "Apsa", "Lowndes", "ASC", "Outras"];
+const areas = ["Backoffice", "Jurídico", "Financeiro", "Propostas"];
+const statuses: Status[] = ["Novo", "Em análise", "Pendente", "Concluído", "Cancelado"];
+const administratorReasons = [
+  "Duplicidade",
+  "Emissão de CND",
+  "Verificação de situação das cotas",
+  "Emissão de Planilha Débito",
+  "Solicitação de simulação de acordo",
+  "Outros",
+];
+const clientReasons = [
+  "Emissão de CND",
+  "Verificação de cotas em aberto",
+  "Solicitação de acordo",
+  "Reclamações",
+  "Informações",
+  "Outros",
+];
+const recordTypes: Record<RecordType, string> = {
+  client: "Cliente",
+  administrator: "Administradora",
+};
+
+// Usa UUID quando disponível e mantém fallback para navegadores antigos.
+function makeId() {
+  return globalThis.crypto?.randomUUID
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+// Protocolo incremental amigável para o usuário e para busca operacional.
+function makeProtocol(records: SolicitationRecord[]) {
+  const year = new Date().getFullYear();
+  const prefix = `SOF-${year}-`;
+  const lastNumber = records
+    .map((record) => record.protocol)
+    .filter((protocol) => protocol?.startsWith(prefix))
+    .map((protocol) => Number(protocol.replace(prefix, "")))
+    .filter(Number.isFinite)
+    .reduce((highest, current) => Math.max(highest, current), 0);
+
+  return `${prefix}${String(lastNumber + 1).padStart(5, "0")}`;
+}
+
+// Registros antigos ou importados recebem protocolo compatível sem quebrar o app.
+function fallbackProtocol(record: Partial<SolicitationRecord>) {
+  const year = new Date(record.createdAt || Date.now()).getFullYear();
+  const suffix = String(record.id || makeId())
+    .replace(/[^a-z0-9]/gi, "")
+    .slice(-5)
+    .toUpperCase()
+    .padStart(5, "0");
+
+  return `SOF-${year}-${suffix}`;
+}
+
+function isStatus(value: unknown): value is Status {
+  return typeof value === "string" && statuses.includes(value as Status);
+}
+
+// Normaliza dados salvos no navegador para proteger a UI contra formatos antigos.
+function normalizeRecord(record: Partial<SolicitationRecord>): SolicitationRecord {
+  const createdAt = record.createdAt || new Date().toISOString();
+
+  return {
+    id: record.id || makeId(),
+    protocol: record.protocol || fallbackProtocol({ ...record, createdAt }),
+    type: record.type === "client" ? "client" : "administrator",
+    name: record.name || "",
+    administrator: record.administrator || "",
+    email: record.email || "",
+    phone: record.phone || "",
+    condominium: record.condominium || "",
+    complement: record.complement || "",
+    area: record.area || "",
+    reason: record.reason || "",
+    description: record.description || "",
+    status: isStatus(record.status) ? record.status : "Novo",
+    attachments: Array.isArray(record.attachments) ? record.attachments : [],
+    createdAt,
+    updatedAt: record.updatedAt || createdAt,
+  };
+}
+
+// Carregamento defensivo: se o localStorage estiver vazio/corrompido, o app abre limpo.
+function loadSavedRecords(): SolicitationRecord[] {
+  try {
+    const savedRecords = window.localStorage.getItem(STORAGE_KEY);
+    const parsedRecords = savedRecords ? (JSON.parse(savedRecords) as Partial<SolicitationRecord>[]) : [];
+    return Array.isArray(parsedRecords) ? parsedRecords.map(normalizeRecord) : [];
+  } catch {
+    return [];
+  }
+}
+
+function formatDate(value: string) {
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(new Date(value));
+}
+
+function formatBytes(bytes: number) {
+  if (!bytes) return "0 KB";
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** index;
+  return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+function formatPhone(value: string) {
+  const digits = value.replace(/\D/g, "").slice(0, 11);
+
+  if (digits.length <= 2) {
+    return digits ? `(${digits}` : "";
+  }
+
+  if (digits.length <= 6) {
+    return `(${digits.slice(0, 2)}) ${digits.slice(2)}`;
+  }
+
+  if (digits.length <= 10) {
+    return `(${digits.slice(0, 2)}) ${digits.slice(2, 6)}-${digits.slice(6)}`;
+  }
+
+  return `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7)}`;
+}
+
+// Mantém anexos no protótipo local em Data URL; no Supabase isso pode migrar para Storage.
+function fileToAttachment(file: File): Promise<Attachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      resolve({
+        id: makeId(),
+        name: file.name,
+        type: file.type || "application/octet-stream",
+        size: file.size,
+        dataUrl: String(reader.result || ""),
+      });
+    };
+
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+// Payload JSON esperado pelo Pipefy para abertura de solicitações da Área do Cliente.
+function buildClientWebhookPayload(record: SolicitationRecord) {
+  return {
+    source: "sofico_area_cliente",
+    event: "client_solicitation_created",
+    protocol: record.protocol,
+    type: record.type,
+    status: record.status,
+    customer: {
+      name: record.name,
+      email: record.email,
+      phone: record.phone,
+    },
+    condominium: {
+      name: record.condominium,
+      complement: record.complement,
+    },
+    request: {
+      reason: record.reason,
+      description: record.description,
+    },
+    attachments: record.attachments.map((attachment) => ({
+      name: attachment.name,
+      type: attachment.type,
+      size: attachment.size,
+    })),
+    createdAt: record.createdAt,
+  };
+}
+
+// Envia somente JSON ao webhook; se o endpoint exigir segredo, o ideal é mover isso para uma Edge Function.
+async function sendClientWebhook(record: SolicitationRecord) {
+  const webhookUrl = import.meta.env.VITE_PIPEFY_CLIENT_WEBHOOK_URL;
+
+  if (!webhookUrl) {
+    return;
+  }
+
+  const response = await fetch(webhookUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(buildClientWebhookPayload(record)),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Webhook Pipefy respondeu com status ${response.status}.`);
+  }
+}
+
+function App() {
+  const [bootError, setBootError] = useState("");
+  const [records, setRecords] = useState<SolicitationRecord[]>(loadSavedRecords);
+  const [form, setForm] = useState<SolicitationForm>({ ...initialForm, type: "client" });
+  const [activeTab, setActiveTab] = useState<ActiveTab>("client");
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [loginForm, setLoginForm] = useState({ email: "", password: "" });
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginError, setLoginError] = useState("");
+  const [search, setSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const [areaFilter, setAreaFilter] = useState("");
+  const [selectedRecord, setSelectedRecord] = useState<SolicitationRecord | null>(null);
+  const [toast, setToast] = useState("");
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef(null);
+
+  // Persistência local temporária até as solicitações migrarem para tabela no Supabase.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+    } catch {
+      setBootError("O navegador bloqueou ou esgotou o armazenamento local. Remova alguns anexos grandes e tente novamente.");
+    }
+  }, [records]);
+
+  // Toast simples para feedback curto depois de salvar, entrar, sair ou mudar status.
+  useEffect(() => {
+    if (!toast) return undefined;
+    const timer = window.setTimeout(() => setToast(""), 2800);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
+  // Sessão do Supabase Auth: só a Área do Operador fica protegida por login hoje.
+  useEffect(() => {
+    let mounted = true;
+
+    supabase.auth.getSession().then(({ data }) => {
+      if (!mounted) return;
+      setSession(data.session);
+      setAuthLoading(false);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, currentSession) => {
+      setSession(currentSession);
+      setAuthLoading(false);
+
+      if (event === "SIGNED_OUT") {
+        setActiveTab("client");
+        setSelectedRecord(null);
+      }
+    });
+
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  // Filtros do operador ficam memoizados para evitar recálculo desnecessário ao digitar.
+  const filteredRecords = useMemo(() => {
+    const normalizedSearch = search.trim().toLowerCase();
+
+    return records
+      .filter((record) => {
+        const searchText = [
+          record.protocol,
+          recordTypes[record.type],
+          record.name,
+          record.administrator,
+          record.email,
+          record.phone,
+          record.condominium,
+          record.complement,
+          record.area,
+          record.reason,
+          record.status,
+          record.description,
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        return (
+          (!normalizedSearch || searchText.includes(normalizedSearch)) &&
+          (!typeFilter || record.type === typeFilter) &&
+          (!areaFilter || record.area === areaFilter)
+        );
+      })
+      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  }, [areaFilter, records, search, typeFilter]);
+
+  // Indicadores gerais da sidebar do operador.
+  const stats = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+
+    return {
+      total: records.length,
+      clients: records.filter((record) => record.type === "client").length,
+      administrators: records.filter((record) => record.type === "administrator").length,
+      legal: records.filter((record) => record.area === "Jurídico").length,
+      today: records.filter((record) => record.createdAt.slice(0, 10) === today).length,
+      attachments: records.reduce((sum, record) => sum + record.attachments.length, 0),
+      pending: records.filter((record) => ["Novo", "Em análise", "Pendente"].includes(record.status)).length,
+    };
+  }, [records]);
+
+  // Indicadores da tela do operador respeitam busca e filtros ativos.
+  const filteredStats = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+
+    return {
+      total: filteredRecords.length,
+      clients: filteredRecords.filter((record) => record.type === "client").length,
+      administrators: filteredRecords.filter((record) => record.type === "administrator").length,
+      legal: filteredRecords.filter((record) => record.area === "Jurídico").length,
+      today: filteredRecords.filter((record) => record.createdAt.slice(0, 10) === today).length,
+      pending: filteredRecords.filter((record) => ["Novo", "Em análise", "Pendente"].includes(record.status)).length,
+      areas: new Set(filteredRecords.map((record) => record.area)).size,
+    };
+  }, [filteredRecords]);
+
+  if (bootError) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-fi-paper p-6">
+        <div className="max-w-xl rounded-lg border border-violet-100 bg-white p-6 text-center shadow-glow">
+          <img className="mx-auto mb-4 h-16 w-16 rounded-lg" src="/fi-logo.png" alt="Logo Sofico" />
+          <h1 className="text-2xl font-black text-fi-navy">Não consegui abrir o CRUD</h1>
+          <p className="mt-3 text-sm font-semibold text-slate-500">{bootError}</p>
+          <button
+            className="button-primary mt-5"
+            type="button"
+            onClick={() => {
+              window.localStorage.removeItem(STORAGE_KEY);
+              window.location.reload();
+            }}
+          >
+            Limpar dados locais e recarregar
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  function updateField(event) {
+    const { name, value } = event.target;
+    setForm((current) => ({ ...current, [name]: name === "phone" ? formatPhone(value) : value }));
+  }
+
+  function updateLoginField(event) {
+    const { name, value } = event.target;
+    setLoginForm((current) => ({ ...current, [name]: value }));
+  }
+
+  async function signInOperator(event) {
+    event.preventDefault();
+    setLoginLoading(true);
+    setLoginError("");
+
+    const { error } = await supabase.auth.signInWithPassword({
+      email: loginForm.email.trim(),
+      password: loginForm.password,
+    });
+
+    setLoginLoading(false);
+
+    if (error) {
+      setLoginError("E-mail ou senha inválidos.");
+      return;
+    }
+
+    setLoginForm({ email: "", password: "" });
+    setToast("Acesso liberado para a Área do Operador.");
+  }
+
+  async function signOutOperator() {
+    await supabase.auth.signOut();
+    setToast("Sessão do operador encerrada.");
+  }
+
+  async function addFiles(files) {
+    const incomingFiles = Array.from(files);
+    if (!incomingFiles.length) return;
+
+    const convertedFiles = await Promise.all(incomingFiles.map(fileToAttachment));
+    setForm((current) => ({
+      ...current,
+      attachments: [...current.attachments, ...convertedFiles],
+    }));
+    setToast(`${incomingFiles.length} anexo(s) adicionado(s).`);
+  }
+
+  function resetForm() {
+    setForm({ ...initialForm, type: activeTab === "administrator" ? "administrator" : "client" });
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  }
+
+  function removeAttachment(id) {
+    setForm((current) => ({
+      ...current,
+      attachments: current.attachments.filter((attachment) => attachment.id !== id),
+    }));
+  }
+
+  async function saveRecord(event) {
+    event.preventDefault();
+
+    if (activeTab === "client") {
+      const hasEmail = Boolean(form.email.trim());
+      const hasPhone = Boolean(form.phone.trim());
+
+      if (!hasEmail && !hasPhone) {
+        setToast("Informe pelo menos E-mail ou Telefone/Whatsapp.");
+        return;
+      }
+    }
+
+    const now = new Date().toISOString();
+    const isNewRecord = !form.id;
+    const record = {
+      ...form,
+      id: form.id || makeId(),
+      type: form.type || (activeTab === "administrator" ? "administrator" : "client"),
+      protocol: form.protocol || makeProtocol(records),
+      status: form.status || "Novo",
+      email: form.email.trim(),
+      name: form.name?.trim() || "",
+      phone: form.phone?.trim() || "",
+      condominium: form.condominium?.trim() || "",
+      complement: form.complement?.trim() || "",
+      description: form.description.trim(),
+      createdAt: "createdAt" in form ? form.createdAt || now : now,
+      updatedAt: now,
+    };
+
+    setRecords((current) => {
+      const exists = current.some((item) => item.id === record.id);
+      return exists
+        ? current.map((item) => (item.id === record.id ? record : item))
+        : [record, ...current];
+    });
+
+    resetForm();
+
+    if (isNewRecord && record.type === "client") {
+      try {
+        await sendClientWebhook(record);
+        setToast(`Contato cadastrado e enviado ao Pipefy. Protocolo: ${record.protocol}.`);
+      } catch {
+        setToast(`Contato cadastrado, mas não foi possível enviar ao Pipefy. Protocolo: ${record.protocol}.`);
+      }
+      return;
+    }
+
+    setToast(form.id ? "Contato atualizado com sucesso." : `Contato cadastrado. Protocolo: ${record.protocol}.`);
+  }
+
+  function updateStatus(recordId, status) {
+    const now = new Date().toISOString();
+
+    setRecords((current) =>
+      current.map((record) => (record.id === recordId ? { ...record, status, updatedAt: now } : record)),
+    );
+
+    setSelectedRecord((current) => (current?.id === recordId ? { ...current, status, updatedAt: now } : current));
+    setToast("Status do caso atualizado.");
+  }
+
+  function editRecord(record) {
+    setForm(record);
+    setSelectedRecord(null);
+    setActiveTab(record.type === "client" ? "client" : "administrator");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function deleteRecord(recordId) {
+    const record = records.find((item) => item.id === recordId);
+    const label = record ? `${record.protocol} - ${record.email}` : "este contato";
+
+    if (!window.confirm(`Excluir ${label}?`)) {
+      return;
+    }
+
+    setRecords((current) => current.filter((item) => item.id !== recordId));
+    if (selectedRecord?.id === recordId) {
+      setSelectedRecord(null);
+    }
+    setToast("Contato excluído.");
+  }
+
+  function exportCsv() {
+    if (!records.length) {
+      setToast("Não há registros para exportar.");
+      return;
+    }
+
+    const headers = [
+      "ID",
+      "Protocolo",
+      "Status",
+      "Tipo",
+      "Nome",
+      "Administradora",
+      "Email",
+      "Telefone",
+      "Condominio",
+      "Complemento",
+      "Area",
+      "Motivo",
+      "Descricao",
+      "Anexos",
+      "Criado em",
+      "Atualizado em",
+    ];
+
+    const rows = records.map((record) => [
+      record.id,
+      record.protocol,
+      record.status,
+      recordTypes[record.type],
+      record.name,
+      record.administrator,
+      record.email,
+      record.phone,
+      record.condominium,
+      record.complement,
+      record.area,
+      record.reason,
+      record.description,
+      record.attachments.map((attachment) => attachment.name).join("; "),
+      record.createdAt,
+      record.updatedAt,
+    ]);
+
+    const csv = [headers, ...rows]
+      .map((row) => row.map((cell) => `"${String(cell ?? "").replaceAll('"', '""')}"`).join(","))
+      .join("\n");
+
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `contatos-sofico-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  return (
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,rgba(255,77,26,0.12),transparent_32%),linear-gradient(135deg,#f8f7ff_0%,#ffffff_48%,#f4f0ff_100%)]">
+      <aside className="fixed inset-y-0 left-0 hidden w-72 bg-fi-navy text-white lg:flex lg:flex-col">
+        <div className="flex items-center gap-4 px-7 py-7">
+          <img className="h-14 w-14 rounded-lg" src="/fi-logo.png" alt="Logo Sofico" />
+          <div>
+            <p className="text-lg font-black leading-tight">Sofico</p>
+            <p className="text-sm font-semibold text-white/62">Central de atendimento</p>
+          </div>
+        </div>
+
+        <nav className="grid gap-2 px-4">
+          <button
+            className={`flex min-h-11 items-center gap-3 rounded-lg px-3 text-left text-sm font-extrabold transition ${
+              activeTab === "client" ? "bg-white/10 text-white" : "text-white/75 hover:bg-white/10 hover:text-white"
+            }`}
+            type="button"
+            onClick={() => {
+              setActiveTab("client");
+              setForm((current) => (current.id ? current : { ...initialForm, type: "client" }));
+            }}
+          >
+            <Plus size={18} />
+            Área do Cliente
+          </button>
+          <button
+            className={`flex min-h-11 items-center gap-3 rounded-lg px-3 text-left text-sm font-extrabold transition ${
+              activeTab === "administrator" ? "bg-white/10 text-white" : "text-white/75 hover:bg-white/10 hover:text-white"
+            }`}
+            type="button"
+            onClick={() => {
+              setActiveTab("administrator");
+              setForm((current) => (current.id ? current : { ...initialForm, type: "administrator" }));
+            }}
+          >
+            <FileText size={18} />
+            Área da Administradora
+          </button>
+          <button
+            className={`flex min-h-11 items-center gap-3 rounded-lg px-3 text-left text-sm font-extrabold transition ${
+              activeTab === "operator" ? "bg-white/10 text-white" : "text-white/75 hover:bg-white/10 hover:text-white"
+            }`}
+            type="button"
+            onClick={() => setActiveTab("operator")}
+          >
+            <FileText size={18} />
+            Área do Operador
+          </button>
+          {activeTab === "operator" && (
+            <button
+              className="flex min-h-11 items-center gap-3 rounded-lg px-3 text-left text-sm font-extrabold text-white/75 transition hover:bg-white/10 hover:text-white"
+              type="button"
+              onClick={session ? exportCsv : undefined}
+              disabled={!session}
+            >
+              <Download size={18} />
+              Exportar CSV
+            </button>
+          )}
+        </nav>
+
+        {activeTab === "operator" && session && (
+          <div className="mt-auto grid gap-3 px-4 pb-5">
+            <Metric label="Total" value={stats.total} />
+            <Metric label="Clientes" value={stats.clients} />
+            <Metric label="Administradoras" value={stats.administrators} />
+          </div>
+        )}
+      </aside>
+
+      <main className="lg:pl-72">
+        <header className="border-b border-violet-100/80 bg-white/95 px-4 py-4 md:px-8 lg:px-10">
+          <div className="mx-auto flex max-w-7xl flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div className="flex items-center gap-4">
+              <img className="h-12 w-12 rounded-lg lg:hidden" src="/fi-logo.png" alt="Logo Sofico" />
+              <div>
+                <p className="text-xs font-black uppercase text-fi-orange">
+                  {activeTab === "operator"
+                    ? "Área do Operador"
+                    : activeTab === "administrator"
+                      ? "Área da Administradora"
+                      : "Área do Cliente"}
+                </p>
+                <h1 className="text-2xl font-black tracking-normal text-fi-navy md:text-4xl">
+                  {activeTab === "operator"
+                    ? "Solicitações recebidas"
+                    : activeTab === "administrator"
+                      ? "Solicitação da administradora"
+                      : "Solicitação do cliente"}
+                </h1>
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2 md:flex md:items-center">
+              <div className="grid w-full grid-cols-3 rounded-lg border border-violet-100 bg-white p-1 md:w-auto">
+                <button
+                  className={`min-h-10 truncate rounded-md px-2 text-xs font-extrabold transition sm:px-3 sm:text-sm ${
+                    activeTab === "client" ? "bg-fi-navy text-white" : "text-fi-navy hover:bg-violet-50"
+                  }`}
+                  type="button"
+                  onClick={() => {
+                    setActiveTab("client");
+                    setForm((current) => (current.id ? current : { ...initialForm, type: "client" }));
+                  }}
+                >
+                  Cliente
+                </button>
+                <button
+                  className={`min-h-10 truncate rounded-md px-2 text-xs font-extrabold transition sm:px-3 sm:text-sm ${
+                    activeTab === "administrator" ? "bg-fi-navy text-white" : "text-fi-navy hover:bg-violet-50"
+                  }`}
+                  type="button"
+                  onClick={() => {
+                    setActiveTab("administrator");
+                    setForm((current) => (current.id ? current : { ...initialForm, type: "administrator" }));
+                  }}
+                >
+                  Administradora
+                </button>
+                <button
+                  className={`min-h-10 truncate rounded-md px-2 text-xs font-extrabold transition sm:px-3 sm:text-sm ${
+                    activeTab === "operator" ? "bg-fi-navy text-white" : "text-fi-navy hover:bg-violet-50"
+                  }`}
+                  type="button"
+                  onClick={() => setActiveTab("operator")}
+                >
+                  Operador
+                </button>
+              </div>
+              {activeTab === "operator" && (
+                session ? (
+                  <>
+                    <button className="button-secondary w-full md:w-auto" type="button" onClick={signOutOperator}>
+                      Sair
+                    </button>
+                    <button className="button-primary w-full md:w-auto" type="button" onClick={exportCsv}>
+                      <Download size={18} />
+                      Exportar
+                    </button>
+                  </>
+                ) : (
+                  <span className="rounded-lg border border-violet-100 bg-white px-4 py-3 text-sm font-extrabold text-fi-navy">
+                    Login necessário
+                  </span>
+                )
+              )}
+            </div>
+          </div>
+        </header>
+
+        <div
+          className={`mx-auto grid max-w-7xl gap-6 px-4 py-6 md:px-8 lg:px-10 ${
+            activeTab === "client" || activeTab === "administrator" ? "lg:max-w-6xl" : ""
+          }`}
+        >
+          {(activeTab === "client" || activeTab === "administrator") && (
+          <section id="form" className="rounded-lg border border-violet-100 bg-white p-5 shadow-glow md:p-6">
+            <div className="mb-6 flex items-start justify-between gap-4">
+              <div>
+                <div className="mb-3 inline-flex items-center gap-2 rounded-full bg-fi-orangeSoft px-3 py-1 text-xs font-black text-fi-orange">
+                  <Sparkles size={15} />
+                  {form.id ? "Editando registro" : "Novo atendimento"}
+                </div>
+                <h2 className="text-xl font-black text-fi-navy">
+                  {form.id
+                    ? "Atualizar contato"
+                    : activeTab === "client"
+                      ? "Cadastrar solicitação do cliente"
+                      : "Cadastrar solicitação da administradora"}
+                </h2>
+                <p className="mt-1 text-sm font-medium text-slate-500">
+                  {activeTab === "client"
+                    ? "Registre a demanda do cliente e anexe documentos úteis para análise."
+                    : "Registre a demanda da administradora e mantenha os comprovantes ligados ao caso."}
+                </p>
+              </div>
+              {form.id && (
+                <button className="icon-button" type="button" title="Cancelar edição" onClick={resetForm}>
+                  <X size={18} />
+                </button>
+              )}
+            </div>
+
+            <form className="grid gap-4" onSubmit={saveRecord}>
+              <div className="grid gap-4 md:grid-cols-2">
+                {activeTab === "client" ? (
+                  <>
+                    <label className="field-label">
+                      Nome
+                      <input
+                        className="field-control"
+                        name="name"
+                        type="text"
+                        placeholder="Nome completo"
+                        value={form.name}
+                        onChange={updateField}
+                        required
+                      />
+                    </label>
+
+                    <label className="field-label">
+                      E-mail
+                      <span className="relative">
+                        <Mail className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35" size={17} />
+                        <input
+                          className="field-control pl-10"
+                          name="email"
+                          type="email"
+                          placeholder="nome@email.com"
+                          value={form.email}
+                          onChange={updateField}
+                        />
+                      </span>
+                    </label>
+
+                    <label className="field-label">
+                      Telefone ou Whatsapp
+                      <input
+                        className="field-control"
+                        name="phone"
+                        type="tel"
+                        inputMode="tel"
+                        maxLength={15}
+                        placeholder="(21) 99999-9999"
+                        value={form.phone}
+                        onChange={updateField}
+                      />
+                    </label>
+
+                    <label className="field-label">
+                      Condomínio
+                      <input
+                        className="field-control"
+                        name="condominium"
+                        type="text"
+                        placeholder="Nome do condomínio"
+                        value={form.condominium}
+                        onChange={updateField}
+                        required
+                      />
+                    </label>
+
+                    <label className="field-label">
+                      Complemento
+                      <input
+                        className="field-control"
+                        name="complement"
+                        type="text"
+                        placeholder="Bloco, unidade ou referência"
+                        value={form.complement}
+                        onChange={updateField}
+                        required
+                      />
+                    </label>
+
+                    <label className="field-label">
+                      Motivo do contato
+                      <select className="field-control" name="reason" value={form.reason} onChange={updateField} required>
+                        <option value="">Selecione</option>
+                        {clientReasons.map((reason) => (
+                          <option key={reason}>{reason}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </>
+                ) : (
+                  <>
+                <label className="field-label">
+                  Selecione sua Administradora
+                  <select
+                    className="field-control"
+                    name="administrator"
+                    value={form.administrator}
+                    onChange={updateField}
+                    required
+                  >
+                    <option value="">Selecione</option>
+                    {administrators.map((administrator) => (
+                      <option key={administrator}>{administrator}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="field-label">
+                  E-mail
+                  <span className="relative">
+                    <Mail className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35" size={17} />
+                    <input
+                      className="field-control pl-10"
+                      name="email"
+                      type="email"
+                      placeholder="nome@empresa.com"
+                      value={form.email}
+                      onChange={updateField}
+                      required
+                    />
+                  </span>
+                </label>
+
+                <label className="field-label">
+                  Área da Sofico contatada
+                  <select className="field-control" name="area" value={form.area} onChange={updateField} required>
+                    <option value="">Selecione</option>
+                    {areas.map((area) => (
+                      <option key={area}>{area}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="field-label">
+                  Motivo do contato
+                  <select className="field-control" name="reason" value={form.reason} onChange={updateField} required>
+                    <option value="">Selecione</option>
+                    {administratorReasons.map((reason) => (
+                      <option key={reason}>{reason}</option>
+                    ))}
+                  </select>
+                </label>
+                  </>
+                )}
+              </div>
+
+              <label className="field-label">
+                Descrição do caso
+                <textarea
+                  className="field-area"
+                  name="description"
+                  placeholder="Descreva o contexto, histórico e próximos passos necessários."
+                  value={form.description}
+                  onChange={updateField}
+                  required
+                />
+              </label>
+
+              <label
+                className={`grid min-h-40 place-items-center gap-2 rounded-lg border-2 border-dashed p-5 text-center transition ${
+                  isDragging
+                    ? "border-fi-orange bg-fi-orangeSoft"
+                    : "border-violet-200 bg-gradient-to-br from-violet-50 to-white"
+                }`}
+                onDragLeave={() => setIsDragging(false)}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  setIsDragging(true);
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  setIsDragging(false);
+                  addFiles(event.dataTransfer.files);
+                }}
+              >
+                <input
+                  ref={fileInputRef}
+                  className="sr-only"
+                  type="file"
+                  multiple
+                  onChange={(event) => addFiles(event.target.files)}
+                />
+                <span className="inline-flex h-11 w-11 items-center justify-center rounded-lg bg-fi-navy text-white">
+                  <UploadCloud size={22} />
+                </span>
+                <strong className="text-sm font-black text-fi-navy">Anexe comprovantes e arquivos úteis</strong>
+                <small className="max-w-md text-sm font-medium text-slate-500">
+                  Arraste arquivos para cá ou clique para selecionar documentos, imagens, PDFs e planilhas.
+                </small>
+              </label>
+
+              {form.attachments.length > 0 && (
+                <ul className="grid gap-2">
+                  {form.attachments.map((attachment) => (
+                    <li
+                      className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-violet-100 bg-white px-3 py-2"
+                      key={attachment.id}
+                    >
+                      <span className="flex min-w-0 items-center gap-2 text-sm font-bold text-slate-600">
+                        <FileArchive className="shrink-0 text-fi-orange" size={17} />
+                        <span className="truncate">{attachment.name}</span>
+                        <span className="shrink-0 text-xs text-slate-400">{formatBytes(attachment.size)}</span>
+                      </span>
+                      <button className="icon-button shrink-0" type="button" onClick={() => removeAttachment(attachment.id)}>
+                        <Trash2 size={16} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
+                <button className="button-secondary" type="button" onClick={resetForm}>
+                  Limpar
+                </button>
+                <button className="button-primary" type="submit">
+                  <Plus size={18} />
+                  {form.id ? "Atualizar contato" : "Salvar contato"}
+                </button>
+              </div>
+            </form>
+          </section>
+          )}
+
+          {activeTab === "operator" && !session && (
+            <section className="mx-auto w-full max-w-xl rounded-lg border border-violet-100 bg-white p-6 shadow-glow">
+              <div className="mb-6 text-center">
+                <img className="mx-auto mb-4 h-16 w-16 rounded-lg" src="/fi-logo.png" alt="Logo Sofico" />
+                <p className="text-xs font-black uppercase text-fi-orange">Área do Operador</p>
+                <h2 className="mt-1 text-2xl font-black text-fi-navy">Login do operador</h2>
+                <p className="mt-2 text-sm font-semibold text-slate-500">
+                  Entre com o usuário cadastrado no Supabase para acessar as solicitações.
+                </p>
+              </div>
+
+              {authLoading ? (
+                <div className="rounded-lg border border-violet-100 bg-violet-50 p-4 text-center text-sm font-extrabold text-fi-navy">
+                  Verificando sessão...
+                </div>
+              ) : (
+                <form className="grid gap-4" onSubmit={signInOperator}>
+                  <label className="field-label">
+                    E-mail
+                    <input
+                      className="field-control"
+                      name="email"
+                      type="email"
+                      placeholder="operador@sofico.com"
+                      value={loginForm.email}
+                      onChange={updateLoginField}
+                      required
+                    />
+                  </label>
+
+                  <label className="field-label">
+                    Senha
+                    <input
+                      className="field-control"
+                      name="password"
+                      type="password"
+                      placeholder="Digite sua senha"
+                      value={loginForm.password}
+                      onChange={updateLoginField}
+                      required
+                    />
+                  </label>
+
+                  {loginError && (
+                    <div className="rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-sm font-bold text-red-700">
+                      {loginError}
+                    </div>
+                  )}
+
+                  <button className="button-primary" type="submit" disabled={loginLoading}>
+                    {loginLoading ? "Entrando..." : "Entrar na Área do Operador"}
+                  </button>
+                </form>
+              )}
+            </section>
+          )}
+
+          {activeTab === "operator" && session && (
+          <section id="records" className="min-w-0 rounded-lg border border-violet-100 bg-white p-5 shadow-glow md:p-6">
+            <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+              <div>
+                <h2 className="text-xl font-black text-fi-navy">Registros</h2>
+                <p className="mt-1 text-sm font-medium text-slate-500">
+                  Pesquise, filtre, edite, exclua e baixe anexos cadastrados.
+                </p>
+              </div>
+              <div className="grid gap-3 md:grid-cols-[minmax(220px,1fr)_minmax(150px,180px)_minmax(150px,180px)] xl:w-full xl:max-w-[760px]">
+                <label className="relative">
+                  <span className="sr-only">Buscar registros</span>
+                  <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35" size={18} />
+                  <input
+                    className="field-control pl-10"
+                    type="search"
+                    placeholder="Buscar por protocolo, nome, e-mail ou motivo"
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                  />
+                </label>
+                <label className="relative">
+                  <span className="sr-only">Filtrar por tipo</span>
+                  <Filter className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35" size={18} />
+                  <select className="field-control pl-10" value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
+                    <option value="">Todos os tipos</option>
+                    <option value="client">Clientes</option>
+                    <option value="administrator">Administradoras</option>
+                  </select>
+                </label>
+                <label className="relative">
+                  <span className="sr-only">Filtrar por área</span>
+                  <Filter className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35" size={18} />
+                  <select className="field-control pl-10" value={areaFilter} onChange={(event) => setAreaFilter(event.target.value)}>
+                    <option value="">Todas as áreas</option>
+                    {areas.map((area) => (
+                      <option key={area}>{area}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            </div>
+
+            <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <SummaryCard label="Total filtrado" value={filteredStats.total} />
+              <SummaryCard label="Em aberto" value={filteredStats.pending} accent="orange" />
+              <SummaryCard label="Clientes" value={filteredStats.clients} />
+              <SummaryCard label="Administradoras" value={filteredStats.administrators} accent="orange" />
+            </div>
+
+            <div className="rounded-lg border border-violet-100 bg-violet-50/50 p-3">
+              <div className="grid gap-3">
+                {filteredRecords.map((record) => (
+                  <article className="rounded-lg border border-violet-100 bg-white p-4 transition hover:border-fi-orange/35" key={record.id}>
+                    <div className="grid min-w-0 gap-3 md:grid-cols-2 2xl:grid-cols-[120px_118px_minmax(0,1.1fr)_minmax(0,1.25fr)_minmax(0,1fr)_150px_220px] 2xl:items-center">
+                      <RecordCell label="Protocolo">
+                        <span className="chip max-w-full bg-fi-orangeSoft text-fi-orange">
+                          <span className="whitespace-normal break-all leading-tight">{record.protocol}</span>
+                        </span>
+                      </RecordCell>
+
+                      <RecordCell label="Tipo">
+                        <span className="chip max-w-full bg-violet-100 text-fi-navy">
+                          <span className="truncate">{recordTypes[record.type]}</span>
+                        </span>
+                      </RecordCell>
+
+                      <RecordCell label="Solicitante">
+                        <strong className="block truncate text-sm font-black text-fi-navy">
+                          {record.type === "client" ? record.name : record.administrator}
+                        </strong>
+                        <span className="block truncate text-xs font-semibold text-slate-400">{formatDate(record.createdAt)}</span>
+                      </RecordCell>
+
+                      <RecordCell label="E-mail">
+                        <span className="block truncate text-sm font-semibold text-slate-600">{record.email}</span>
+                      </RecordCell>
+
+                      <RecordCell label="Motivo">
+                        <span className="block truncate text-sm font-semibold text-slate-600">{record.reason}</span>
+                        <span className="mt-1 inline-flex max-w-full text-xs font-bold text-fi-navy/55">
+                          <span className="truncate">{record.area || "Sem área"}</span>
+                        </span>
+                      </RecordCell>
+
+                      <RecordCell label="Status">
+                        <select
+                          className="field-control min-h-9 text-xs font-extrabold"
+                          value={record.status}
+                          onChange={(event) => updateStatus(record.id, event.target.value)}
+                        >
+                          {statuses.map((status) => (
+                            <option key={status}>{status}</option>
+                          ))}
+                        </select>
+                      </RecordCell>
+
+                      <div className="grid min-w-0 gap-2 sm:grid-cols-[auto_1fr] sm:items-center 2xl:grid-cols-[auto_auto] 2xl:justify-end">
+                        <span className="chip max-w-max bg-fi-orangeSoft text-fi-orange">{record.attachments.length} anexos</span>
+                        <div className="flex flex-wrap gap-2 sm:justify-end">
+                          <button className="icon-button" type="button" title="Ver" onClick={() => setSelectedRecord(record)}>
+                            <Eye size={16} />
+                          </button>
+                          <button className="icon-button" type="button" title="Editar" onClick={() => editRecord(record)}>
+                            <Pencil size={16} />
+                          </button>
+                          <button className="icon-button" type="button" title="Excluir" onClick={() => deleteRecord(record.id)}>
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+
+              {filteredRecords.length === 0 && (
+                <div className="grid min-h-52 place-items-center gap-2 px-6 py-12 text-center">
+                  <div className="inline-flex h-12 w-12 items-center justify-center rounded-lg bg-fi-orangeSoft text-fi-orange">
+                    <FileText size={24} />
+                  </div>
+                  <strong className="text-fi-navy">Nenhum contato encontrado</strong>
+                  <span className="max-w-sm text-sm font-medium text-slate-500">
+                    Cadastre o primeiro caso ou ajuste a busca e o filtro de área.
+                  </span>
+                </div>
+              )}
+            </div>
+          </section>
+          )}
+        </div>
+      </main>
+
+      {selectedRecord && (
+        <div className="fixed inset-0 z-40 grid place-items-center bg-fi-navy/55 p-4">
+          <article className="modal-scroll max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-lg bg-white p-5 shadow-xl md:p-6">
+            <header className="mb-5 flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-black uppercase text-fi-orange">Detalhes do contato</p>
+                <h2 className="text-2xl font-black text-fi-navy">
+                  {selectedRecord.protocol} · {selectedRecord.type === "client" ? selectedRecord.name : selectedRecord.administrator}
+                </h2>
+              </div>
+              <button className="icon-button" type="button" onClick={() => setSelectedRecord(null)}>
+                <X size={18} />
+              </button>
+            </header>
+
+            <div className="grid gap-3 md:grid-cols-2">
+              <Detail label="Protocolo" value={selectedRecord.protocol} />
+              <Detail label="Tipo" value={recordTypes[selectedRecord.type]} />
+              <div className="rounded-lg border border-violet-100 bg-violet-50/65 p-4">
+                <span className="text-xs font-black uppercase text-fi-navy/55">Status</span>
+                <select
+                  className="field-control mt-2"
+                  value={selectedRecord.status}
+                  onChange={(event) => updateStatus(selectedRecord.id, event.target.value)}
+                >
+                  {statuses.map((status) => (
+                    <option key={status}>{status}</option>
+                  ))}
+                </select>
+              </div>
+              {selectedRecord.type === "client" ? (
+                <>
+                  <Detail label="Nome" value={selectedRecord.name} />
+                  <Detail label="Telefone ou Whatsapp" value={selectedRecord.phone} />
+                  <Detail label="Condomínio" value={selectedRecord.condominium} />
+                  <Detail label="Complemento" value={selectedRecord.complement || "-"} />
+                </>
+              ) : (
+                <Detail label="Administradora" value={selectedRecord.administrator} />
+              )}
+              <Detail label="E-mail" value={selectedRecord.email} />
+              {selectedRecord.type === "administrator" && <Detail label="Área" value={selectedRecord.area} />}
+              <Detail label="Motivo" value={selectedRecord.reason} />
+              <Detail label="Descrição do caso" value={selectedRecord.description} wide />
+              <Detail label="Criado em" value={formatDate(selectedRecord.createdAt)} />
+              <Detail label="Atualizado em" value={formatDate(selectedRecord.updatedAt)} />
+              <div className="rounded-lg border border-violet-100 bg-violet-50/65 p-4 md:col-span-2">
+                <span className="text-xs font-black uppercase text-fi-navy/55">Anexos</span>
+                <div className="mt-3 grid gap-2">
+                  {selectedRecord.attachments.length > 0 ? (
+                    selectedRecord.attachments.map((attachment) => (
+                      <a
+                        className="flex min-h-11 items-center gap-2 rounded-lg bg-white px-3 text-sm font-extrabold text-fi-navy transition hover:text-fi-orange"
+                        download={attachment.name}
+                        href={attachment.dataUrl}
+                        key={attachment.id}
+                      >
+                        <Download size={16} />
+                        <span className="truncate">{attachment.name}</span>
+                        <span className="ml-auto shrink-0 text-xs text-slate-400">{formatBytes(attachment.size)}</span>
+                      </a>
+                    ))
+                  ) : (
+                    <p className="m-0 text-sm font-semibold text-slate-500">Nenhum anexo cadastrado.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <footer className="mt-5 flex flex-col gap-3 sm:flex-row sm:justify-end">
+              <button className="button-secondary" type="button" onClick={() => editRecord(selectedRecord)}>
+                <Pencil size={18} />
+                Editar
+              </button>
+              <button className="button-primary" type="button" onClick={() => setSelectedRecord(null)}>
+                Fechar
+              </button>
+            </footer>
+          </article>
+        </div>
+      )}
+
+      <div
+        className={`fixed bottom-5 right-5 z-50 max-w-[calc(100vw-2.5rem)] rounded-lg bg-fi-navy px-4 py-3 text-sm font-extrabold text-white shadow-2xl transition ${
+          toast ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-4 opacity-0"
+        }`}
+      >
+        {toast}
+      </div>
+    </div>
+  );
+}
+
+type MetricProps = {
+  label: string;
+  value: number;
+};
+
+type RecordCellProps = {
+  label: string;
+  children: React.ReactNode;
+};
+
+// Célula reutilizada nos cards do operador para manter alinhamento e truncamento consistentes.
+function RecordCell({ label, children }: RecordCellProps) {
+  return (
+    <div className="min-w-0">
+      <span className="mb-1 block truncate text-[0.68rem] font-black uppercase text-fi-navy/45">{label}</span>
+      {children}
+    </div>
+  );
+}
+
+// Indicador compacto usado na sidebar.
+function Metric({ label, value }: MetricProps) {
+  return (
+    <div className="rounded-lg border border-white/12 bg-white/8 p-4">
+      <span className="text-xs font-black uppercase text-white/55">{label}</span>
+      <strong className="mt-1 block text-3xl font-black">{value}</strong>
+    </div>
+  );
+}
+
+type SummaryCardProps = {
+  label: string;
+  value: number;
+  accent?: "navy" | "orange";
+};
+
+// Indicadores da área do operador, sempre baseados nos filtros atuais.
+function SummaryCard({ label, value, accent = "navy" }: SummaryCardProps) {
+  const colorClass = accent === "orange" ? "bg-fi-orangeSoft text-fi-orange" : "bg-violet-100 text-fi-navy";
+
+  return (
+    <div className="rounded-lg border border-violet-100 bg-white p-4">
+      <span className="text-xs font-black uppercase text-slate-400">{label}</span>
+      <div className="mt-2 flex items-center justify-between">
+        <strong className="text-3xl font-black text-fi-navy">{value}</strong>
+        <span className={`h-3 w-3 rounded-full ${colorClass}`} />
+      </div>
+    </div>
+  );
+}
+
+type DetailProps = {
+  label: string;
+  value: React.ReactNode;
+  wide?: boolean;
+};
+
+// Bloco de detalhe do modal; aceita conteúdo longo sem empurrar o layout.
+function Detail({ label, value, wide }: DetailProps) {
+  return (
+    <div className={`rounded-lg border border-violet-100 bg-violet-50/65 p-4 ${wide ? "md:col-span-2" : ""}`}>
+      <span className="text-xs font-black uppercase text-fi-navy/55">{label}</span>
+      <p className="mt-2 whitespace-pre-wrap break-words text-sm font-semibold text-fi-ink">{value}</p>
+    </div>
+  );
+}
+
+export default App;
