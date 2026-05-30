@@ -17,7 +17,7 @@ import React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./supabaseClient";
 
-const STORAGE_KEY = "fi-sofico-cases";
+const ATTACHMENTS_BUCKET = "solicitacao-anexos";
 
 // Tipos centrais do fluxo: cliente, administradora, operador e registros compartilhados.
 type RecordType = "client" | "administrator";
@@ -30,6 +30,16 @@ type Attachment = {
   type: string;
   size: number;
   dataUrl: string;
+  path?: string;
+};
+
+type UserRole = "administradora" | "operador" | "admin";
+
+type UserProfile = {
+  id: string;
+  email: string;
+  role: UserRole;
+  administradora?: string | null;
 };
 
 type SolicitationRecord = {
@@ -54,6 +64,24 @@ type SolicitationRecord = {
 type SolicitationForm = Omit<SolicitationRecord, "createdAt" | "updatedAt"> & {
   createdAt?: string;
   updatedAt?: string;
+};
+
+type DbSolicitationRow = {
+  id: string;
+  protocolo: string;
+  tipo: RecordType;
+  status: Status;
+  nome: string | null;
+  email: string | null;
+  telefone: string | null;
+  condominio: string | null;
+  complemento: string | null;
+  administradora: string | null;
+  area: string | null;
+  motivo: string | null;
+  descricao: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 const initialForm: SolicitationForm = {
@@ -104,7 +132,7 @@ function makeId() {
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-// Protocolo incremental amigável para o usuário e para busca operacional.
+// Protocolo amigável para o usuário e seguro contra colisões sem precisar consultar dados públicos.
 function makeProtocol(records: SolicitationRecord[]) {
   const year = new Date().getFullYear();
   const prefix = `SOF-${year}-`;
@@ -115,7 +143,8 @@ function makeProtocol(records: SolicitationRecord[]) {
     .filter(Number.isFinite)
     .reduce((highest, current) => Math.max(highest, current), 0);
 
-  return `${prefix}${String(lastNumber + 1).padStart(5, "0")}`;
+  const timeNumber = Number(String(Date.now()).slice(-5));
+  return `${prefix}${String(Math.max(lastNumber + 1, timeNumber)).padStart(5, "0")}`;
 }
 
 // Registros antigos ou importados recebem protocolo compatível sem quebrar o app.
@@ -134,39 +163,45 @@ function isStatus(value: unknown): value is Status {
   return typeof value === "string" && statuses.includes(value as Status);
 }
 
-// Normaliza dados salvos no navegador para proteger a UI contra formatos antigos.
-function normalizeRecord(record: Partial<SolicitationRecord>): SolicitationRecord {
-  const createdAt = record.createdAt || new Date().toISOString();
-
+// Converte a linha snake_case do Supabase para o modelo camelCase usado pela UI.
+function mapDbSolicitation(row: DbSolicitationRow, attachments: Attachment[] = []): SolicitationRecord {
   return {
-    id: record.id || makeId(),
-    protocol: record.protocol || fallbackProtocol({ ...record, createdAt }),
-    type: record.type === "client" ? "client" : "administrator",
-    name: record.name || "",
-    administrator: record.administrator || "",
-    email: record.email || "",
-    phone: record.phone || "",
-    condominium: record.condominium || "",
-    complement: record.complement || "",
-    area: record.area || "",
-    reason: record.reason || "",
-    description: record.description || "",
-    status: isStatus(record.status) ? record.status : "Novo",
-    attachments: Array.isArray(record.attachments) ? record.attachments : [],
-    createdAt,
-    updatedAt: record.updatedAt || createdAt,
+    id: row.id,
+    protocol: row.protocolo,
+    type: row.tipo,
+    name: row.nome || "",
+    administrator: row.administradora || "",
+    email: row.email || "",
+    phone: row.telefone || "",
+    condominium: row.condominio || "",
+    complement: row.complemento || "",
+    area: row.area || "",
+    reason: row.motivo || "",
+    description: row.descricao || "",
+    status: isStatus(row.status) ? row.status : "Novo",
+    attachments,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
-// Carregamento defensivo: se o localStorage estiver vazio/corrompido, o app abre limpo.
-function loadSavedRecords(): SolicitationRecord[] {
-  try {
-    const savedRecords = window.localStorage.getItem(STORAGE_KEY);
-    const parsedRecords = savedRecords ? (JSON.parse(savedRecords) as Partial<SolicitationRecord>[]) : [];
-    return Array.isArray(parsedRecords) ? parsedRecords.map(normalizeRecord) : [];
-  } catch {
-    return [];
-  }
+// Converte o modelo da UI para as colunas do Supabase.
+function mapSolicitationToDb(record: SolicitationRecord) {
+  return {
+    id: record.id,
+    protocolo: record.protocol,
+    tipo: record.type,
+    status: record.status,
+    nome: record.name || null,
+    email: record.email || null,
+    telefone: record.phone || null,
+    condominio: record.condominium || null,
+    complemento: record.complement || null,
+    administradora: record.administrator || null,
+    area: record.area || null,
+    motivo: record.reason,
+    descricao: record.description || null,
+  };
 }
 
 function formatDate(value: string) {
@@ -202,7 +237,28 @@ function formatPhone(value: string) {
   return `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7)}`;
 }
 
-// Mantém anexos no protótipo local em Data URL; no Supabase isso pode migrar para Storage.
+function sanitizeFileName(name: string) {
+  return name
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9._-]/g, "-")
+    .replace(/-+/g, "-");
+}
+
+function dataUrlToBlob(dataUrl: string) {
+  const [header, base64] = dataUrl.split(",");
+  const mime = header.match(/data:(.*?);base64/)?.[1] || "application/octet-stream";
+  const bytes = atob(base64 || "");
+  const array = new Uint8Array(bytes.length);
+
+  for (let index = 0; index < bytes.length; index += 1) {
+    array[index] = bytes.charCodeAt(index);
+  }
+
+  return new Blob([array], { type: mime });
+}
+
+// Mantém leitura local para preview imediato; o arquivo é enviado ao Supabase Storage no submit.
 function fileToAttachment(file: File): Promise<Attachment> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -220,6 +276,62 @@ function fileToAttachment(file: File): Promise<Attachment> {
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(file);
   });
+}
+
+async function uploadRecordAttachments(record: SolicitationRecord) {
+  const uploadedAttachments: Attachment[] = [];
+
+  for (const attachment of record.attachments) {
+    if (attachment.path || !attachment.dataUrl.startsWith("data:")) {
+      uploadedAttachments.push(attachment);
+      continue;
+    }
+
+    const path = `${record.protocol}/${attachment.id}-${sanitizeFileName(attachment.name)}`;
+    const { error } = await supabase.storage
+      .from(ATTACHMENTS_BUCKET)
+      .upload(path, dataUrlToBlob(attachment.dataUrl), {
+        contentType: attachment.type,
+        upsert: true,
+      });
+
+    if (error) {
+      throw error;
+    }
+
+    uploadedAttachments.push({ ...attachment, path });
+  }
+
+  return uploadedAttachments;
+}
+
+async function fetchRecordAttachments(protocol: string): Promise<Attachment[]> {
+  const { data, error } = await supabase.storage.from(ATTACHMENTS_BUCKET).list(protocol);
+
+  if (error || !data) {
+    return [];
+  }
+
+  const attachments = await Promise.all(
+    data
+      .filter((file) => file.name !== ".emptyFolderPlaceholder")
+      .map(async (file) => {
+        const path = `${protocol}/${file.name}`;
+        const { data: signed } = await supabase.storage.from(ATTACHMENTS_BUCKET).createSignedUrl(path, 60 * 10);
+        const originalName = file.name.replace(/^[^-]+-/, "");
+
+        return {
+          id: path,
+          name: originalName,
+          type: String(file.metadata?.mimetype || "application/octet-stream"),
+          size: Number(file.metadata?.size || 0),
+          dataUrl: signed?.signedUrl || "",
+          path,
+        };
+      }),
+  );
+
+  return attachments;
 }
 
 // Payload JSON esperado pelo Pipefy para abertura de solicitações da Área do Cliente.
@@ -273,12 +385,22 @@ async function sendClientWebhook(record: SolicitationRecord) {
   }
 }
 
+function canAccessAdministrator(profile: UserProfile | null) {
+  return Boolean(profile && ["administradora", "operador", "admin"].includes(profile.role));
+}
+
+function canAccessOperator(profile: UserProfile | null) {
+  return Boolean(profile && ["operador", "admin"].includes(profile.role));
+}
+
 function App() {
   const [bootError, setBootError] = useState("");
-  const [records, setRecords] = useState<SolicitationRecord[]>(loadSavedRecords);
+  const [records, setRecords] = useState<SolicitationRecord[]>([]);
   const [form, setForm] = useState<SolicitationForm>({ ...initialForm, type: "client" });
   const [activeTab, setActiveTab] = useState<ActiveTab>("client");
   const [session, setSession] = useState(null);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [recordsLoading, setRecordsLoading] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
   const [loginLoading, setLoginLoading] = useState(false);
@@ -291,15 +413,6 @@ function App() {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef(null);
 
-  // Persistência local temporária até as solicitações migrarem para tabela no Supabase.
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
-    } catch {
-      setBootError("O navegador bloqueou ou esgotou o armazenamento local. Remova alguns anexos grandes e tente novamente.");
-    }
-  }, [records]);
-
   // Toast simples para feedback curto depois de salvar, entrar, sair ou mudar status.
   useEffect(() => {
     if (!toast) return undefined;
@@ -307,7 +420,7 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  // Sessão do Supabase Auth: só a Área do Operador fica protegida por login hoje.
+  // Sessão do Supabase Auth: operador e administradora usam login e roles em profiles.
   useEffect(() => {
     let mounted = true;
 
@@ -326,6 +439,8 @@ function App() {
       if (event === "SIGNED_OUT") {
         setActiveTab("client");
         setSelectedRecord(null);
+        setProfile(null);
+        setRecords([]);
       }
     });
 
@@ -334,6 +449,61 @@ function App() {
       subscription.unsubscribe();
     };
   }, []);
+
+  useEffect(() => {
+    if (!session?.user?.id) {
+      setProfile(null);
+      return;
+    }
+
+    supabase
+      .from("profiles")
+      .select("id,email,role,administradora")
+      .eq("id", session.user.id)
+      .single()
+      .then(({ data, error }) => {
+        if (error || !data) {
+          setProfile(null);
+          return;
+        }
+
+        setProfile(data as UserProfile);
+      });
+  }, [session]);
+
+  async function refreshRecords() {
+    if (!canAccessOperator(profile)) {
+      setRecords([]);
+      return;
+    }
+
+    setRecordsLoading(true);
+    const { data, error } = await supabase
+      .from("solicitacoes")
+      .select("*")
+      .order("updated_at", { ascending: false });
+
+    if (error || !data) {
+      setRecordsLoading(false);
+      setToast("Não foi possível carregar as solicitações do Supabase.");
+      return;
+    }
+
+    const recordsWithAttachments = await Promise.all(
+      (data as DbSolicitationRow[]).map(async (row) =>
+        mapDbSolicitation(row, await fetchRecordAttachments(row.protocolo)),
+      ),
+    );
+
+    setRecords(recordsWithAttachments);
+    setRecordsLoading(false);
+  }
+
+  useEffect(() => {
+    if (activeTab === "operator" && canAccessOperator(profile)) {
+      refreshRecords();
+    }
+  }, [activeTab, profile]);
 
   // Filtros do operador ficam memoizados para evitar recálculo desnecessário ao digitar.
   const filteredRecords = useMemo(() => {
@@ -407,12 +577,9 @@ function App() {
           <button
             className="button-primary mt-5"
             type="button"
-            onClick={() => {
-              window.localStorage.removeItem(STORAGE_KEY);
-              window.location.reload();
-            }}
+            onClick={() => window.location.reload()}
           >
-            Limpar dados locais e recarregar
+            Recarregar
           </button>
         </div>
       </div>
@@ -484,6 +651,11 @@ function App() {
   async function saveRecord(event) {
     event.preventDefault();
 
+    if (activeTab === "administrator" && !canAccessAdministrator(profile)) {
+      setToast("Faça login com perfil de administradora para registrar essa solicitação.");
+      return;
+    }
+
     if (activeTab === "client") {
       const hasEmail = Boolean(form.email.trim());
       const hasPhone = Boolean(form.phone.trim());
@@ -496,7 +668,7 @@ function App() {
 
     const now = new Date().toISOString();
     const isNewRecord = !form.id;
-    const record = {
+    const record: SolicitationRecord = {
       ...form,
       id: form.id || makeId(),
       type: form.type || (activeTab === "administrator" ? "administrator" : "client"),
@@ -512,30 +684,64 @@ function App() {
       updatedAt: now,
     };
 
-    setRecords((current) => {
-      const exists = current.some((item) => item.id === record.id);
-      return exists
-        ? current.map((item) => (item.id === record.id ? record : item))
-        : [record, ...current];
-    });
+    try {
+      let recordToPersist = record;
 
-    resetForm();
+      if (isNewRecord) {
+        const { error } = await supabase.from("solicitacoes").insert(mapSolicitationToDb(recordToPersist));
+        if (error) throw error;
 
-    if (isNewRecord && record.type === "client") {
-      try {
-        await sendClientWebhook(record);
-        setToast(`Contato cadastrado e enviado ao Pipefy. Protocolo: ${record.protocol}.`);
-      } catch {
-        setToast(`Contato cadastrado, mas não foi possível enviar ao Pipefy. Protocolo: ${record.protocol}.`);
+        try {
+          const attachments = await uploadRecordAttachments(recordToPersist);
+          recordToPersist = { ...recordToPersist, attachments };
+        } catch (error) {
+          console.error("Erro ao enviar anexos para o Supabase Storage:", error);
+          setToast(`Contato cadastrado, mas os anexos não foram enviados. Protocolo: ${recordToPersist.protocol}.`);
+        }
+      } else {
+        const { id, ...updates } = mapSolicitationToDb(recordToPersist);
+        const { error } = await supabase.from("solicitacoes").update(updates).eq("id", id);
+        if (error) throw error;
       }
-      return;
-    }
 
-    setToast(form.id ? "Contato atualizado com sucesso." : `Contato cadastrado. Protocolo: ${record.protocol}.`);
+      if (canAccessOperator(profile)) {
+        setRecords((current) => {
+          const exists = current.some((item) => item.id === recordToPersist.id);
+          return exists
+            ? current.map((item) => (item.id === recordToPersist.id ? recordToPersist : item))
+            : [recordToPersist, ...current];
+        });
+      }
+
+      resetForm();
+
+      if (isNewRecord && recordToPersist.type === "client") {
+        try {
+          await sendClientWebhook(recordToPersist);
+          setToast(`Contato cadastrado e enviado ao Pipefy. Protocolo: ${recordToPersist.protocol}.`);
+        } catch {
+          setToast(`Contato cadastrado, mas não foi possível enviar ao Pipefy. Protocolo: ${recordToPersist.protocol}.`);
+        }
+        return;
+      }
+
+      setToast(form.id ? "Contato atualizado com sucesso." : `Contato cadastrado. Protocolo: ${recordToPersist.protocol}.`);
+    } catch (error) {
+      console.error("Erro ao salvar solicitação no Supabase:", error);
+      const message = error instanceof Error ? error.message : "Erro desconhecido";
+      setToast(`Não foi possível salvar no Supabase: ${message}`);
+    }
   }
 
-  function updateStatus(recordId, status) {
+  async function updateStatus(recordId, status) {
     const now = new Date().toISOString();
+
+    const { error } = await supabase.from("solicitacoes").update({ status }).eq("id", recordId);
+
+    if (error) {
+      setToast("Não foi possível atualizar o status.");
+      return;
+    }
 
     setRecords((current) =>
       current.map((record) => (record.id === recordId ? { ...record, status, updatedAt: now } : record)),
@@ -552,11 +758,24 @@ function App() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function deleteRecord(recordId) {
+  async function deleteRecord(recordId) {
     const record = records.find((item) => item.id === recordId);
     const label = record ? `${record.protocol} - ${record.email}` : "este contato";
 
     if (!window.confirm(`Excluir ${label}?`)) {
+      return;
+    }
+
+    if (record?.attachments.length) {
+      await supabase.storage
+        .from(ATTACHMENTS_BUCKET)
+        .remove(record.attachments.map((attachment) => attachment.path).filter(Boolean) as string[]);
+    }
+
+    const { error } = await supabase.from("solicitacoes").delete().eq("id", recordId);
+
+    if (error) {
+      setToast("Não foi possível excluir a solicitação.");
       return;
     }
 
@@ -675,8 +894,8 @@ function App() {
             <button
               className="flex min-h-11 items-center gap-3 rounded-lg px-3 text-left text-sm font-extrabold text-white/75 transition hover:bg-white/10 hover:text-white"
               type="button"
-              onClick={session ? exportCsv : undefined}
-              disabled={!session}
+              onClick={canAccessOperator(profile) ? exportCsv : undefined}
+              disabled={!canAccessOperator(profile)}
             >
               <Download size={18} />
               Exportar CSV
@@ -684,7 +903,7 @@ function App() {
           )}
         </nav>
 
-        {activeTab === "operator" && session && (
+        {activeTab === "operator" && canAccessOperator(profile) && (
           <div className="mt-auto grid gap-3 px-4 pb-5">
             <Metric label="Total" value={stats.total} />
             <Metric label="Clientes" value={stats.clients} />
@@ -752,7 +971,7 @@ function App() {
                 </button>
               </div>
               {activeTab === "operator" && (
-                session ? (
+                canAccessOperator(profile) ? (
                   <>
                     <button className="button-secondary w-full md:w-auto" type="button" onClick={signOutOperator}>
                       Sair
@@ -777,7 +996,64 @@ function App() {
             activeTab === "client" || activeTab === "administrator" ? "lg:max-w-6xl" : ""
           }`}
         >
-          {(activeTab === "client" || activeTab === "administrator") && (
+          {activeTab === "administrator" && !canAccessAdministrator(profile) && (
+            <section className="mx-auto w-full max-w-xl rounded-lg border border-violet-100 bg-white p-6 shadow-glow">
+              <div className="mb-6 text-center">
+                <img className="mx-auto mb-4 h-16 w-16 rounded-lg" src="/fi-logo.png" alt="Logo Sofico" />
+                <p className="text-xs font-black uppercase text-fi-orange">Área da Administradora</p>
+                <h2 className="mt-1 text-2xl font-black text-fi-navy">Login da administradora</h2>
+                <p className="mt-2 text-sm font-semibold text-slate-500">
+                  Entre com um usuário de administradora, operador ou admin para registrar solicitações.
+                </p>
+              </div>
+
+              {authLoading ? (
+                <div className="rounded-lg border border-violet-100 bg-violet-50 p-4 text-center text-sm font-extrabold text-fi-navy">
+                  Verificando sessão...
+                </div>
+              ) : (
+                <form className="grid gap-4" onSubmit={signInOperator}>
+                  <label className="field-label">
+                    E-mail
+                    <input
+                      className="field-control"
+                      name="email"
+                      type="email"
+                      placeholder="administradora@empresa.com"
+                      value={loginForm.email}
+                      onChange={updateLoginField}
+                      required
+                    />
+                  </label>
+
+                  <label className="field-label">
+                    Senha
+                    <input
+                      className="field-control"
+                      name="password"
+                      type="password"
+                      placeholder="Digite sua senha"
+                      value={loginForm.password}
+                      onChange={updateLoginField}
+                      required
+                    />
+                  </label>
+
+                  {loginError && (
+                    <div className="rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-sm font-bold text-red-700">
+                      {loginError}
+                    </div>
+                  )}
+
+                  <button className="button-primary" type="submit" disabled={loginLoading}>
+                    {loginLoading ? "Entrando..." : "Entrar"}
+                  </button>
+                </form>
+              )}
+            </section>
+          )}
+
+          {(activeTab === "client" || (activeTab === "administrator" && canAccessAdministrator(profile))) && (
           <section id="form" className="rounded-lg border border-violet-100 bg-white p-5 shadow-glow md:p-6">
             <div className="mb-6 flex items-start justify-between gap-4">
               <div>
@@ -1022,7 +1298,7 @@ function App() {
           </section>
           )}
 
-          {activeTab === "operator" && !session && (
+          {activeTab === "operator" && !canAccessOperator(profile) && (
             <section className="mx-auto w-full max-w-xl rounded-lg border border-violet-100 bg-white p-6 shadow-glow">
               <div className="mb-6 text-center">
                 <img className="mx-auto mb-4 h-16 w-16 rounded-lg" src="/fi-logo.png" alt="Logo Sofico" />
@@ -1033,7 +1309,16 @@ function App() {
                 </p>
               </div>
 
-              {authLoading ? (
+              {session && profile && !canAccessOperator(profile) ? (
+                <div className="grid gap-3">
+                  <div className="rounded-lg border border-red-100 bg-red-50 px-3 py-3 text-sm font-bold text-red-700">
+                    Este usuário não tem permissão de operador.
+                  </div>
+                  <button className="button-secondary" type="button" onClick={signOutOperator}>
+                    Sair e entrar com outro usuário
+                  </button>
+                </div>
+              ) : authLoading ? (
                 <div className="rounded-lg border border-violet-100 bg-violet-50 p-4 text-center text-sm font-extrabold text-fi-navy">
                   Verificando sessão...
                 </div>
@@ -1079,7 +1364,7 @@ function App() {
             </section>
           )}
 
-          {activeTab === "operator" && session && (
+          {activeTab === "operator" && canAccessOperator(profile) && (
           <section id="records" className="min-w-0 rounded-lg border border-violet-100 bg-white p-5 shadow-glow md:p-6">
             <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
               <div>
@@ -1130,6 +1415,12 @@ function App() {
             </div>
 
             <div className="rounded-lg border border-violet-100 bg-violet-50/50 p-3">
+              {recordsLoading && (
+                <div className="mb-3 rounded-lg border border-violet-100 bg-white px-4 py-3 text-sm font-extrabold text-fi-navy">
+                  Carregando solicitações...
+                </div>
+              )}
+
               <div className="grid gap-3">
                 {filteredRecords.map((record) => (
                   <article className="rounded-lg border border-violet-100 bg-white p-4 transition hover:border-fi-orange/35" key={record.id}>
