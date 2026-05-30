@@ -608,6 +608,27 @@ function App() {
   }, [activeTab, profile]);
 
   useEffect(() => {
+    if (activeTab !== "operator" || !canAccessOperator(profile)) {
+      return;
+    }
+
+    const channel = supabase
+      .channel("solicitacoes-status-sync")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "solicitacoes" },
+        () => {
+          refreshRecords();
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [activeTab, profile]);
+
+  useEffect(() => {
     if (activeTab !== "administrator" || profile?.role !== "administradora") {
       return;
     }
