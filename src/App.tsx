@@ -40,6 +40,7 @@ type UserProfile = {
   email: string;
   role: UserRole;
   administradora?: string | null;
+  administrador?: string | null;
 };
 
 type SolicitationRecord = {
@@ -101,9 +102,23 @@ const initialForm: SolicitationForm = {
   attachments: [],
 };
 
-const administrators = ["Habitacional", "Semog", "Controlar", "Apsa", "Lowndes", "ASC", "Outras"];
+const administrators = [
+  "Habitacional",
+  "Semog",
+  "Controlar",
+  "Apsa",
+  "Lowndes",
+  "ASC",
+  "Outras",
+];
 const areas = ["Backoffice", "Jurídico", "Financeiro", "Propostas"];
-const statuses: Status[] = ["Novo", "Em análise", "Pendente", "Concluído", "Cancelado"];
+const statuses: Status[] = [
+  "Novo",
+  "Em análise",
+  "Pendente",
+  "Concluído",
+  "Cancelado",
+];
 const administratorReasons = [
   "Duplicidade",
   "Emissão de CND",
@@ -164,7 +179,10 @@ function isStatus(value: unknown): value is Status {
 }
 
 // Converte a linha snake_case do Supabase para o modelo camelCase usado pela UI.
-function mapDbSolicitation(row: DbSolicitationRow, attachments: Attachment[] = []): SolicitationRecord {
+function mapDbSolicitation(
+  row: DbSolicitationRow,
+  attachments: Attachment[] = [],
+): SolicitationRecord {
   return {
     id: row.id,
     protocol: row.protocolo,
@@ -214,7 +232,10 @@ function formatDate(value: string) {
 function formatBytes(bytes: number) {
   if (!bytes) return "0 KB";
   const units = ["B", "KB", "MB", "GB"];
-  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const index = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+    units.length - 1,
+  );
   const value = bytes / 1024 ** index;
   return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 }
@@ -247,7 +268,8 @@ function sanitizeFileName(name: string) {
 
 function dataUrlToBlob(dataUrl: string) {
   const [header, base64] = dataUrl.split(",");
-  const mime = header.match(/data:(.*?);base64/)?.[1] || "application/octet-stream";
+  const mime =
+    header.match(/data:(.*?);base64/)?.[1] || "application/octet-stream";
   const bytes = atob(base64 || "");
   const array = new Uint8Array(bytes.length);
 
@@ -306,7 +328,9 @@ async function uploadRecordAttachments(record: SolicitationRecord) {
 }
 
 async function fetchRecordAttachments(protocol: string): Promise<Attachment[]> {
-  const { data, error } = await supabase.storage.from(ATTACHMENTS_BUCKET).list(protocol);
+  const { data, error } = await supabase.storage
+    .from(ATTACHMENTS_BUCKET)
+    .list(protocol);
 
   if (error || !data) {
     return [];
@@ -317,7 +341,9 @@ async function fetchRecordAttachments(protocol: string): Promise<Attachment[]> {
       .filter((file) => file.name !== ".emptyFolderPlaceholder")
       .map(async (file) => {
         const path = `${protocol}/${file.name}`;
-        const { data: signed } = await supabase.storage.from(ATTACHMENTS_BUCKET).createSignedUrl(path, 60 * 10);
+        const { data: signed } = await supabase.storage
+          .from(ATTACHMENTS_BUCKET)
+          .createSignedUrl(path, 60 * 10);
         const originalName = file.name.replace(/^[^-]+-/, "");
 
         return {
@@ -386,17 +412,62 @@ async function sendClientWebhook(record: SolicitationRecord) {
 }
 
 function canAccessAdministrator(profile: UserProfile | null) {
-  return Boolean(profile && ["administradora", "operador", "admin"].includes(profile.role));
+  return Boolean(
+    profile && ["administradora", "operador", "admin"].includes(profile.role),
+  );
 }
 
 function canAccessOperator(profile: UserProfile | null) {
   return Boolean(profile && ["operador", "admin"].includes(profile.role));
 }
 
+function getSupabaseErrorMessage(error: unknown) {
+  if (!error) return "Erro desconhecido";
+
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === "object") {
+    const details = error as { message?: string; details?: string; hint?: string; code?: string };
+    return [details.message, details.details, details.hint, details.code].filter(Boolean).join(" | ") || "Erro desconhecido";
+  }
+
+  return String(error);
+}
+
+async function getFunctionErrorMessage(error: unknown, data: unknown) {
+  if (data && typeof data === "object" && "error" in data) {
+    return String((data as { error?: unknown }).error || "Erro desconhecido");
+  }
+
+  const possibleError = error as { context?: Response } | null;
+
+  if (possibleError?.context instanceof Response) {
+    try {
+      const body = await possibleError.context.clone().json();
+      if (body?.error) return String(body.error);
+      if (body?.message) return String(body.message);
+    } catch {
+      try {
+        const text = await possibleError.context.clone().text();
+        if (text) return text;
+      } catch {
+        // Mantém o fallback abaixo.
+      }
+    }
+  }
+
+  return getSupabaseErrorMessage(error);
+}
+
 function App() {
   const [bootError, setBootError] = useState("");
   const [records, setRecords] = useState<SolicitationRecord[]>([]);
-  const [form, setForm] = useState<SolicitationForm>({ ...initialForm, type: "client" });
+  const [form, setForm] = useState<SolicitationForm>({
+    ...initialForm,
+    type: "client",
+  });
   const [activeTab, setActiveTab] = useState<ActiveTab>("client");
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
@@ -408,9 +479,19 @@ function App() {
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [areaFilter, setAreaFilter] = useState("");
-  const [selectedRecord, setSelectedRecord] = useState<SolicitationRecord | null>(null);
+  const [selectedRecord, setSelectedRecord] =
+    useState<SolicitationRecord | null>(null);
   const [toast, setToast] = useState("");
   const [isDragging, setIsDragging] = useState(false);
+  const [pendingOperatorTab, setPendingOperatorTab] = useState(false);
+  const [showCreateUserModal, setShowCreateUserModal] = useState(false);
+  const [createUserForm, setCreateUserForm] = useState({
+    email: "",
+    password: "",
+    role: "administradora" as "administradora" | "operador",
+    administradora: "",
+  });
+  const [createUserLoading, setCreateUserLoading] = useState(false);
   const fileInputRef = useRef(null);
 
   // Toast simples para feedback curto depois de salvar, entrar, sair ou mudar status.
@@ -460,14 +541,34 @@ function App() {
       .from("profiles")
       .select("id,email,role,administradora")
       .eq("id", session.user.id)
-      .single()
-      .then(({ data, error }) => {
-        if (error || !data) {
+      .maybeSingle()
+      .then(async ({ data, error }) => {
+        if (error?.message?.includes("administradora")) {
+          const fallback = await supabase
+            .from("profiles")
+            .select("id,email,role,administrador")
+            .eq("id", session.user.id)
+            .maybeSingle();
+
+          data = fallback.data as unknown as typeof data;
+          error = fallback.error;
+        }
+
+        if (error) {
+          console.error("Erro ao carregar perfil do usuário:", error);
           setProfile(null);
           return;
         }
 
-        setProfile(data as UserProfile);
+        if (!data) {
+          console.warn("Usuário autenticado sem linha em public.profiles:", session.user.email);
+          setProfile(null);
+          return;
+        }
+
+        const loadedProfile = data as UserProfile;
+        loadedProfile.administradora = loadedProfile.administradora || loadedProfile.administrador || null;
+        setProfile(loadedProfile);
       });
   }, [session]);
 
@@ -484,8 +585,9 @@ function App() {
       .order("updated_at", { ascending: false });
 
     if (error || !data) {
+      console.error("Erro ao carregar solicitações:", error);
       setRecordsLoading(false);
-      setToast("Não foi possível carregar as solicitações do Supabase.");
+      setToast(`Não foi possível carregar as solicitações: ${getSupabaseErrorMessage(error)}`);
       return;
     }
 
@@ -504,6 +606,37 @@ function App() {
       refreshRecords();
     }
   }, [activeTab, profile]);
+
+  useEffect(() => {
+    if (activeTab !== "administrator" || profile?.role !== "administradora") {
+      return;
+    }
+
+    const profileAdministrator = profile.administradora || profile.administrador || "";
+
+    if (!profileAdministrator) {
+      return;
+    }
+
+    setForm((current) => ({
+      ...current,
+      type: "administrator",
+      administrator: profileAdministrator,
+    }));
+  }, [activeTab, profile]);
+
+  // Quando o login é bem-sucedido e o profile carregar com acesso, muda para operator
+  useEffect(() => {
+    if (pendingOperatorTab && canAccessOperator(profile)) {
+      setActiveTab("operator");
+      setPendingOperatorTab(false);
+    }
+
+    if (pendingOperatorTab && session && profile === null && !authLoading) {
+      setLoginError("Login feito, mas este usuário não tem perfil/role em public.profiles.");
+      setPendingOperatorTab(false);
+    }
+  }, [pendingOperatorTab, profile, session, authLoading]);
 
   // Filtros do operador ficam memoizados para evitar recálculo desnecessário ao digitar.
   const filteredRecords = useMemo(() => {
@@ -534,9 +667,11 @@ function App() {
           (!areaFilter || record.area === areaFilter)
         );
       })
-      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+      .sort(
+        (a, b) =>
+          new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+      );
   }, [areaFilter, records, search, typeFilter]);
-
   // Indicadores gerais da sidebar do operador.
   const stats = useMemo(() => {
     const today = new Date().toISOString().slice(0, 10);
@@ -544,11 +679,19 @@ function App() {
     return {
       total: records.length,
       clients: records.filter((record) => record.type === "client").length,
-      administrators: records.filter((record) => record.type === "administrator").length,
+      administrators: records.filter(
+        (record) => record.type === "administrator",
+      ).length,
       legal: records.filter((record) => record.area === "Jurídico").length,
-      today: records.filter((record) => record.createdAt.slice(0, 10) === today).length,
-      attachments: records.reduce((sum, record) => sum + record.attachments.length, 0),
-      pending: records.filter((record) => ["Novo", "Em análise", "Pendente"].includes(record.status)).length,
+      today: records.filter((record) => record.createdAt.slice(0, 10) === today)
+        .length,
+      attachments: records.reduce(
+        (sum, record) => sum + record.attachments.length,
+        0,
+      ),
+      pending: records.filter((record) =>
+        ["Novo", "Em análise", "Pendente"].includes(record.status),
+      ).length,
     };
   }, [records]);
 
@@ -558,11 +701,19 @@ function App() {
 
     return {
       total: filteredRecords.length,
-      clients: filteredRecords.filter((record) => record.type === "client").length,
-      administrators: filteredRecords.filter((record) => record.type === "administrator").length,
-      legal: filteredRecords.filter((record) => record.area === "Jurídico").length,
-      today: filteredRecords.filter((record) => record.createdAt.slice(0, 10) === today).length,
-      pending: filteredRecords.filter((record) => ["Novo", "Em análise", "Pendente"].includes(record.status)).length,
+      clients: filteredRecords.filter((record) => record.type === "client")
+        .length,
+      administrators: filteredRecords.filter(
+        (record) => record.type === "administrator",
+      ).length,
+      legal: filteredRecords.filter((record) => record.area === "Jurídico")
+        .length,
+      today: filteredRecords.filter(
+        (record) => record.createdAt.slice(0, 10) === today,
+      ).length,
+      pending: filteredRecords.filter((record) =>
+        ["Novo", "Em análise", "Pendente"].includes(record.status),
+      ).length,
       areas: new Set(filteredRecords.map((record) => record.area)).size,
     };
   }, [filteredRecords]);
@@ -571,9 +722,17 @@ function App() {
     return (
       <div className="grid min-h-screen place-items-center bg-fi-paper p-6">
         <div className="max-w-xl rounded-lg border border-violet-100 bg-white p-6 text-center shadow-glow">
-          <img className="mx-auto mb-4 h-16 w-16 rounded-lg" src="/fi-logo.png" alt="Logo Sofico" />
-          <h1 className="text-2xl font-black text-fi-navy">Não consegui abrir o CRUD</h1>
-          <p className="mt-3 text-sm font-semibold text-slate-500">{bootError}</p>
+          <img
+            className="mx-auto mb-4 h-16 w-16 rounded-lg"
+            src="/fi-logo.png"
+            alt="Logo Sofico"
+          />
+          <h1 className="text-2xl font-black text-fi-navy">
+            Não consegui abrir o CRUD
+          </h1>
+          <p className="mt-3 text-sm font-semibold text-slate-500">
+            {bootError}
+          </p>
           <button
             className="button-primary mt-5"
             type="button"
@@ -588,7 +747,10 @@ function App() {
 
   function updateField(event) {
     const { name, value } = event.target;
-    setForm((current) => ({ ...current, [name]: name === "phone" ? formatPhone(value) : value }));
+    setForm((current) => ({
+      ...current,
+      [name]: name === "phone" ? formatPhone(value) : value,
+    }));
   }
 
   function updateLoginField(event) {
@@ -609,12 +771,14 @@ function App() {
     setLoginLoading(false);
 
     if (error) {
-      setLoginError("E-mail ou senha inválidos.");
+      console.error("Erro de login Supabase Auth:", error);
+      setLoginError(`Falha no login: ${getSupabaseErrorMessage(error)}`);
       return;
     }
 
     setLoginForm({ email: "", password: "" });
-    setToast("Acesso liberado para a Área do Operador.");
+    setPendingOperatorTab(true);
+    setToast("Login realizado. Verificando permissões...");
   }
 
   async function signOutOperator() {
@@ -622,11 +786,50 @@ function App() {
     setToast("Sessão do operador encerrada.");
   }
 
+  async function createNewUser(event) {
+    event.preventDefault();
+    setCreateUserLoading(true);
+
+    if (createUserForm.role === "administradora" && !createUserForm.administradora) {
+      setCreateUserLoading(false);
+      setToast("Selecione a administradora do novo usuário.");
+      return;
+    }
+
+    const { data, error } = await supabase.functions.invoke("create-user", {
+      body: {
+        email: createUserForm.email.trim(),
+        password: createUserForm.password,
+        role: createUserForm.role,
+        administradora: createUserForm.administradora || null,
+      },
+    });
+
+    setCreateUserLoading(false);
+
+    if (error || data?.error) {
+      console.error("Erro ao criar usuário via Edge Function:", error || data);
+      setToast(`Erro ao criar usuário: ${await getFunctionErrorMessage(error, data)}`);
+      return;
+    }
+
+    setToast(`Usuário ${createUserForm.email} criado com sucesso!`);
+    setCreateUserForm({
+      email: "",
+      password: "",
+      role: "administradora",
+      administradora: "",
+    });
+    setShowCreateUserModal(false);
+  }
+
   async function addFiles(files) {
     const incomingFiles = Array.from(files);
     if (!incomingFiles.length) return;
 
-    const convertedFiles = await Promise.all(incomingFiles.map(fileToAttachment));
+    const convertedFiles = await Promise.all(
+      incomingFiles.map(fileToAttachment),
+    );
     setForm((current) => ({
       ...current,
       attachments: [...current.attachments, ...convertedFiles],
@@ -635,7 +838,14 @@ function App() {
   }
 
   function resetForm() {
-    setForm({ ...initialForm, type: activeTab === "administrator" ? "administrator" : "client" });
+    setForm({
+      ...initialForm,
+      type: activeTab === "administrator" ? "administrator" : "client",
+      administrator:
+        activeTab === "administrator" && profile?.role === "administradora"
+          ? profile.administradora || profile.administrador || ""
+          : "",
+    });
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -644,7 +854,9 @@ function App() {
   function removeAttachment(id) {
     setForm((current) => ({
       ...current,
-      attachments: current.attachments.filter((attachment) => attachment.id !== id),
+      attachments: current.attachments.filter(
+        (attachment) => attachment.id !== id,
+      ),
     }));
   }
 
@@ -652,7 +864,9 @@ function App() {
     event.preventDefault();
 
     if (activeTab === "administrator" && !canAccessAdministrator(profile)) {
-      setToast("Faça login com perfil de administradora para registrar essa solicitação.");
+      setToast(
+        "Faça login com perfil de administradora para registrar essa solicitação.",
+      );
       return;
     }
 
@@ -671,7 +885,9 @@ function App() {
     const record: SolicitationRecord = {
       ...form,
       id: form.id || makeId(),
-      type: form.type || (activeTab === "administrator" ? "administrator" : "client"),
+      type:
+        form.type ||
+        (activeTab === "administrator" ? "administrator" : "client"),
       protocol: form.protocol || makeProtocol(records),
       status: form.status || "Novo",
       email: form.email.trim(),
@@ -688,19 +904,29 @@ function App() {
       let recordToPersist = record;
 
       if (isNewRecord) {
-        const { error } = await supabase.from("solicitacoes").insert(mapSolicitationToDb(recordToPersist));
+        const { error } = await supabase
+          .from("solicitacoes")
+          .insert(mapSolicitationToDb(recordToPersist));
         if (error) throw error;
 
         try {
           const attachments = await uploadRecordAttachments(recordToPersist);
           recordToPersist = { ...recordToPersist, attachments };
         } catch (error) {
-          console.error("Erro ao enviar anexos para o Supabase Storage:", error);
-          setToast(`Contato cadastrado, mas os anexos não foram enviados. Protocolo: ${recordToPersist.protocol}.`);
+          console.error(
+            "Erro ao enviar anexos para o Supabase Storage:",
+            error,
+          );
+          setToast(
+            `Contato cadastrado, mas os anexos não foram enviados. Protocolo: ${recordToPersist.protocol}.`,
+          );
         }
       } else {
         const { id, ...updates } = mapSolicitationToDb(recordToPersist);
-        const { error } = await supabase.from("solicitacoes").update(updates).eq("id", id);
+        const { error } = await supabase
+          .from("solicitacoes")
+          .update(updates)
+          .eq("id", id);
         if (error) throw error;
       }
 
@@ -708,7 +934,9 @@ function App() {
         setRecords((current) => {
           const exists = current.some((item) => item.id === recordToPersist.id);
           return exists
-            ? current.map((item) => (item.id === recordToPersist.id ? recordToPersist : item))
+            ? current.map((item) =>
+                item.id === recordToPersist.id ? recordToPersist : item,
+              )
             : [recordToPersist, ...current];
         });
       }
@@ -718,17 +946,25 @@ function App() {
       if (isNewRecord && recordToPersist.type === "client") {
         try {
           await sendClientWebhook(recordToPersist);
-          setToast(`Contato cadastrado e enviado ao Pipefy. Protocolo: ${recordToPersist.protocol}.`);
+          setToast(
+            `Contato cadastrado e enviado ao Pipefy. Protocolo: ${recordToPersist.protocol}.`,
+          );
         } catch {
-          setToast(`Contato cadastrado, mas não foi possível enviar ao Pipefy. Protocolo: ${recordToPersist.protocol}.`);
+          setToast(
+            `Contato cadastrado, mas não foi possível enviar ao Pipefy. Protocolo: ${recordToPersist.protocol}.`,
+          );
         }
         return;
       }
 
-      setToast(form.id ? "Contato atualizado com sucesso." : `Contato cadastrado. Protocolo: ${recordToPersist.protocol}.`);
+      setToast(
+        form.id
+          ? "Contato atualizado com sucesso."
+          : `Contato cadastrado. Protocolo: ${recordToPersist.protocol}.`,
+      );
     } catch (error) {
       console.error("Erro ao salvar solicitação no Supabase:", error);
-      const message = error instanceof Error ? error.message : "Erro desconhecido";
+      const message = getSupabaseErrorMessage(error);
       setToast(`Não foi possível salvar no Supabase: ${message}`);
     }
   }
@@ -736,18 +972,28 @@ function App() {
   async function updateStatus(recordId, status) {
     const now = new Date().toISOString();
 
-    const { error } = await supabase.from("solicitacoes").update({ status }).eq("id", recordId);
+    const { error } = await supabase
+      .from("solicitacoes")
+      .update({ status, updated_at: now })
+      .eq("id", recordId);
 
     if (error) {
-      setToast("Não foi possível atualizar o status.");
+      console.error("Erro ao atualizar status:", error);
+      setToast(`Não foi possível atualizar o status: ${getSupabaseErrorMessage(error)}`);
       return;
     }
 
     setRecords((current) =>
-      current.map((record) => (record.id === recordId ? { ...record, status, updatedAt: now } : record)),
+      current.map((record) =>
+        record.id === recordId ? { ...record, status, updatedAt: now } : record,
+      ),
     );
 
-    setSelectedRecord((current) => (current?.id === recordId ? { ...current, status, updatedAt: now } : current));
+    setSelectedRecord((current) =>
+      current?.id === recordId
+        ? { ...current, status, updatedAt: now }
+        : current,
+    );
     setToast("Status do caso atualizado.");
   }
 
@@ -760,7 +1006,9 @@ function App() {
 
   async function deleteRecord(recordId) {
     const record = records.find((item) => item.id === recordId);
-    const label = record ? `${record.protocol} - ${record.email}` : "este contato";
+    const label = record
+      ? `${record.protocol} - ${record.email}`
+      : "este contato";
 
     if (!window.confirm(`Excluir ${label}?`)) {
       return;
@@ -769,10 +1017,17 @@ function App() {
     if (record?.attachments.length) {
       await supabase.storage
         .from(ATTACHMENTS_BUCKET)
-        .remove(record.attachments.map((attachment) => attachment.path).filter(Boolean) as string[]);
+        .remove(
+          record.attachments
+            .map((attachment) => attachment.path)
+            .filter(Boolean) as string[],
+        );
     }
 
-    const { error } = await supabase.from("solicitacoes").delete().eq("id", recordId);
+    const { error } = await supabase
+      .from("solicitacoes")
+      .delete()
+      .eq("id", recordId);
 
     if (error) {
       setToast("Não foi possível excluir a solicitação.");
@@ -831,10 +1086,16 @@ function App() {
     ]);
 
     const csv = [headers, ...rows]
-      .map((row) => row.map((cell) => `"${String(cell ?? "").replaceAll('"', '""')}"`).join(","))
+      .map((row) =>
+        row
+          .map((cell) => `"${String(cell ?? "").replaceAll('"', '""')}"`)
+          .join(","),
+      )
       .join("\n");
 
-    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const url = URL.createObjectURL(
+      new Blob([csv], { type: "text/csv;charset=utf-8" }),
+    );
     const link = document.createElement("a");
     link.href = url;
     link.download = `contatos-sofico-${new Date().toISOString().slice(0, 10)}.csv`;
@@ -846,22 +1107,32 @@ function App() {
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,rgba(255,77,26,0.12),transparent_32%),linear-gradient(135deg,#f8f7ff_0%,#ffffff_48%,#f4f0ff_100%)]">
       <aside className="fixed inset-y-0 left-0 hidden w-72 bg-fi-navy text-white lg:flex lg:flex-col">
         <div className="flex items-center gap-4 px-7 py-7">
-          <img className="h-14 w-14 rounded-lg" src="/fi-logo.png" alt="Logo Sofico" />
+          <img
+            className="h-14 w-14 rounded-lg"
+            src="/fi-logo.png"
+            alt="Logo Sofico"
+          />
           <div>
             <p className="text-lg font-black leading-tight">Sofico</p>
-            <p className="text-sm font-semibold text-white/62">Central de atendimento</p>
+            <p className="text-sm font-semibold text-white/62">
+              Central de atendimento
+            </p>
           </div>
         </div>
 
         <nav className="grid gap-2 px-4">
           <button
             className={`flex min-h-11 items-center gap-3 rounded-lg px-3 text-left text-sm font-extrabold transition ${
-              activeTab === "client" ? "bg-white/10 text-white" : "text-white/75 hover:bg-white/10 hover:text-white"
+              activeTab === "client"
+                ? "bg-white/10 text-white"
+                : "text-white/75 hover:bg-white/10 hover:text-white"
             }`}
             type="button"
             onClick={() => {
               setActiveTab("client");
-              setForm((current) => (current.id ? current : { ...initialForm, type: "client" }));
+              setForm((current) =>
+                current.id ? current : { ...initialForm, type: "client" },
+              );
             }}
           >
             <Plus size={18} />
@@ -869,12 +1140,18 @@ function App() {
           </button>
           <button
             className={`flex min-h-11 items-center gap-3 rounded-lg px-3 text-left text-sm font-extrabold transition ${
-              activeTab === "administrator" ? "bg-white/10 text-white" : "text-white/75 hover:bg-white/10 hover:text-white"
+              activeTab === "administrator"
+                ? "bg-white/10 text-white"
+                : "text-white/75 hover:bg-white/10 hover:text-white"
             }`}
             type="button"
             onClick={() => {
               setActiveTab("administrator");
-              setForm((current) => (current.id ? current : { ...initialForm, type: "administrator" }));
+              setForm((current) =>
+                current.id
+                  ? current
+                  : { ...initialForm, type: "administrator" },
+              );
             }}
           >
             <FileText size={18} />
@@ -882,7 +1159,9 @@ function App() {
           </button>
           <button
             className={`flex min-h-11 items-center gap-3 rounded-lg px-3 text-left text-sm font-extrabold transition ${
-              activeTab === "operator" ? "bg-white/10 text-white" : "text-white/75 hover:bg-white/10 hover:text-white"
+              activeTab === "operator"
+                ? "bg-white/10 text-white"
+                : "text-white/75 hover:bg-white/10 hover:text-white"
             }`}
             type="button"
             onClick={() => setActiveTab("operator")}
@@ -916,7 +1195,11 @@ function App() {
         <header className="border-b border-violet-100/80 bg-white/95 px-4 py-4 md:px-8 lg:px-10">
           <div className="mx-auto flex max-w-7xl flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div className="flex items-center gap-4">
-              <img className="h-12 w-12 rounded-lg lg:hidden" src="/fi-logo.png" alt="Logo Sofico" />
+              <img
+                className="h-12 w-12 rounded-lg lg:hidden"
+                src="/fi-logo.png"
+                alt="Logo Sofico"
+              />
               <div>
                 <p className="text-xs font-black uppercase text-fi-orange">
                   {activeTab === "operator"
@@ -938,31 +1221,43 @@ function App() {
               <div className="grid w-full grid-cols-3 rounded-lg border border-violet-100 bg-white p-1 md:w-auto">
                 <button
                   className={`min-h-10 truncate rounded-md px-2 text-xs font-extrabold transition sm:px-3 sm:text-sm ${
-                    activeTab === "client" ? "bg-fi-navy text-white" : "text-fi-navy hover:bg-violet-50"
+                    activeTab === "client"
+                      ? "bg-fi-navy text-white"
+                      : "text-fi-navy hover:bg-violet-50"
                   }`}
                   type="button"
                   onClick={() => {
                     setActiveTab("client");
-                    setForm((current) => (current.id ? current : { ...initialForm, type: "client" }));
+                    setForm((current) =>
+                      current.id ? current : { ...initialForm, type: "client" },
+                    );
                   }}
                 >
                   Cliente
                 </button>
                 <button
                   className={`min-h-10 truncate rounded-md px-2 text-xs font-extrabold transition sm:px-3 sm:text-sm ${
-                    activeTab === "administrator" ? "bg-fi-navy text-white" : "text-fi-navy hover:bg-violet-50"
+                    activeTab === "administrator"
+                      ? "bg-fi-navy text-white"
+                      : "text-fi-navy hover:bg-violet-50"
                   }`}
                   type="button"
                   onClick={() => {
                     setActiveTab("administrator");
-                    setForm((current) => (current.id ? current : { ...initialForm, type: "administrator" }));
+                    setForm((current) =>
+                      current.id
+                        ? current
+                        : { ...initialForm, type: "administrator" },
+                    );
                   }}
                 >
                   Administradora
                 </button>
                 <button
                   className={`min-h-10 truncate rounded-md px-2 text-xs font-extrabold transition sm:px-3 sm:text-sm ${
-                    activeTab === "operator" ? "bg-fi-navy text-white" : "text-fi-navy hover:bg-violet-50"
+                    activeTab === "operator"
+                      ? "bg-fi-navy text-white"
+                      : "text-fi-navy hover:bg-violet-50"
                   }`}
                   type="button"
                   onClick={() => setActiveTab("operator")}
@@ -970,208 +1265,259 @@ function App() {
                   Operador
                 </button>
               </div>
-              {activeTab === "operator" && (
-                canAccessOperator(profile) ? (
+              {activeTab === "operator" &&
+                (canAccessOperator(profile) ? (
                   <>
-                    <button className="button-secondary w-full md:w-auto" type="button" onClick={signOutOperator}>
+                    <button
+                      className="button-secondary w-full md:w-auto"
+                      type="button"
+                      onClick={signOutOperator}
+                    >
                       Sair
                     </button>
-                    <button className="button-primary w-full md:w-auto" type="button" onClick={exportCsv}>
+                    <button
+                      className="button-primary w-full md:w-auto"
+                      type="button"
+                      onClick={exportCsv}
+                    >
                       <Download size={18} />
                       Exportar
+                    </button>
+                    <button
+                      className="button-primary w-full md:w-auto"
+                      type="button"
+                      onClick={() => setShowCreateUserModal(true)}
+                    >
+                      <Plus size={18} />
+                      Novo Usuário
                     </button>
                   </>
                 ) : (
                   <span className="rounded-lg border border-violet-100 bg-white px-4 py-3 text-sm font-extrabold text-fi-navy">
                     Login necessário
                   </span>
-                )
-              )}
+                ))}
             </div>
           </div>
         </header>
 
         <div
           className={`mx-auto grid max-w-7xl gap-6 px-4 py-6 md:px-8 lg:px-10 ${
-            activeTab === "client" || activeTab === "administrator" ? "lg:max-w-6xl" : ""
+            activeTab === "client" || activeTab === "administrator"
+              ? "lg:max-w-6xl"
+              : ""
           }`}
         >
-          {activeTab === "administrator" && !canAccessAdministrator(profile) && (
-            <section className="mx-auto w-full max-w-xl rounded-lg border border-violet-100 bg-white p-6 shadow-glow">
-              <div className="mb-6 text-center">
-                <img className="mx-auto mb-4 h-16 w-16 rounded-lg" src="/fi-logo.png" alt="Logo Sofico" />
-                <p className="text-xs font-black uppercase text-fi-orange">Área da Administradora</p>
-                <h2 className="mt-1 text-2xl font-black text-fi-navy">Login da administradora</h2>
-                <p className="mt-2 text-sm font-semibold text-slate-500">
-                  Entre com um usuário de administradora, operador ou admin para registrar solicitações.
-                </p>
-              </div>
-
-              {authLoading ? (
-                <div className="rounded-lg border border-violet-100 bg-violet-50 p-4 text-center text-sm font-extrabold text-fi-navy">
-                  Verificando sessão...
+          {activeTab === "administrator" &&
+            !canAccessAdministrator(profile) && (
+              <section className="mx-auto w-full max-w-xl rounded-lg border border-violet-100 bg-white p-6 shadow-glow">
+                <div className="mb-6 text-center">
+                  <img
+                    className="mx-auto mb-4 h-16 w-16 rounded-lg"
+                    src="/fi-logo.png"
+                    alt="Logo Sofico"
+                  />
+                  <p className="text-xs font-black uppercase text-fi-orange">
+                    Área da Administradora
+                  </p>
+                  <h2 className="mt-1 text-2xl font-black text-fi-navy">
+                    Login da administradora
+                  </h2>
+                  <p className="mt-2 text-sm font-semibold text-slate-500">
+                    Entre com um usuário de administradora, operador ou admin
+                    para registrar solicitações.
+                  </p>
                 </div>
-              ) : (
-                <form className="grid gap-4" onSubmit={signInOperator}>
-                  <label className="field-label">
-                    E-mail
-                    <input
-                      className="field-control"
-                      name="email"
-                      type="email"
-                      placeholder="administradora@empresa.com"
-                      value={loginForm.email}
-                      onChange={updateLoginField}
-                      required
-                    />
-                  </label>
 
-                  <label className="field-label">
-                    Senha
-                    <input
-                      className="field-control"
-                      name="password"
-                      type="password"
-                      placeholder="Digite sua senha"
-                      value={loginForm.password}
-                      onChange={updateLoginField}
-                      required
-                    />
-                  </label>
-
-                  {loginError && (
-                    <div className="rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-sm font-bold text-red-700">
-                      {loginError}
-                    </div>
-                  )}
-
-                  <button className="button-primary" type="submit" disabled={loginLoading}>
-                    {loginLoading ? "Entrando..." : "Entrar"}
-                  </button>
-                </form>
-              )}
-            </section>
-          )}
-
-          {(activeTab === "client" || (activeTab === "administrator" && canAccessAdministrator(profile))) && (
-          <section id="form" className="rounded-lg border border-violet-100 bg-white p-5 shadow-glow md:p-6">
-            <div className="mb-6 flex items-start justify-between gap-4">
-              <div>
-                <div className="mb-3 inline-flex items-center gap-2 rounded-full bg-fi-orangeSoft px-3 py-1 text-xs font-black text-fi-orange">
-                  <Sparkles size={15} />
-                  {form.id ? "Editando registro" : "Novo atendimento"}
-                </div>
-                <h2 className="text-xl font-black text-fi-navy">
-                  {form.id
-                    ? "Atualizar contato"
-                    : activeTab === "client"
-                      ? "Cadastrar solicitação do cliente"
-                      : "Cadastrar solicitação da administradora"}
-                </h2>
-                <p className="mt-1 text-sm font-medium text-slate-500">
-                  {activeTab === "client"
-                    ? "Registre a demanda do cliente e anexe documentos úteis para análise."
-                    : "Registre a demanda da administradora e mantenha os comprovantes ligados ao caso."}
-                </p>
-              </div>
-              {form.id && (
-                <button className="icon-button" type="button" title="Cancelar edição" onClick={resetForm}>
-                  <X size={18} />
-                </button>
-              )}
-            </div>
-
-            <form className="grid gap-4" onSubmit={saveRecord}>
-              <div className="grid gap-4 md:grid-cols-2">
-                {activeTab === "client" ? (
-                  <>
-                    <label className="field-label">
-                      Nome
-                      <input
-                        className="field-control"
-                        name="name"
-                        type="text"
-                        placeholder="Nome completo"
-                        value={form.name}
-                        onChange={updateField}
-                        required
-                      />
-                    </label>
-
+                {authLoading ? (
+                  <div className="rounded-lg border border-violet-100 bg-violet-50 p-4 text-center text-sm font-extrabold text-fi-navy">
+                    Verificando sessão...
+                  </div>
+                ) : (
+                  <form className="grid gap-4" onSubmit={signInOperator}>
                     <label className="field-label">
                       E-mail
-                      <span className="relative">
-                        <Mail className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35" size={17} />
+                      <input
+                        className="field-control"
+                        name="email"
+                        type="email"
+                        placeholder="administradora@empresa.com"
+                        value={loginForm.email}
+                        onChange={updateLoginField}
+                        required
+                      />
+                    </label>
+
+                    <label className="field-label">
+                      Senha
+                      <input
+                        className="field-control"
+                        name="password"
+                        type="password"
+                        placeholder="Digite sua senha"
+                        value={loginForm.password}
+                        onChange={updateLoginField}
+                        required
+                      />
+                    </label>
+
+                    {loginError && (
+                      <div className="rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-sm font-bold text-red-700">
+                        {loginError}
+                      </div>
+                    )}
+
+                    <button
+                      className="button-primary"
+                      type="submit"
+                      disabled={loginLoading}
+                    >
+                      {loginLoading ? "Entrando..." : "Entrar"}
+                    </button>
+                  </form>
+                )}
+              </section>
+            )}
+
+          {(activeTab === "client" ||
+            (activeTab === "administrator" &&
+              canAccessAdministrator(profile))) && (
+            <section
+              id="form"
+              className="rounded-lg border border-violet-100 bg-white p-5 shadow-glow md:p-6"
+            >
+              <div className="mb-6 flex items-start justify-between gap-4">
+                <div>
+                  <div className="mb-3 inline-flex items-center gap-2 rounded-full bg-fi-orangeSoft px-3 py-1 text-xs font-black text-fi-orange">
+                    <Sparkles size={15} />
+                    {form.id ? "Editando registro" : "Novo atendimento"}
+                  </div>
+                  <h2 className="text-xl font-black text-fi-navy">
+                    {form.id
+                      ? "Atualizar contato"
+                      : activeTab === "client"
+                        ? "Cadastrar solicitação do cliente"
+                        : "Cadastrar solicitação da administradora"}
+                  </h2>
+                  <p className="mt-1 text-sm font-medium text-slate-500">
+                    {activeTab === "client"
+                      ? "Registre a demanda do cliente e anexe documentos úteis para análise."
+                      : "Registre a demanda da administradora e mantenha os comprovantes ligados ao caso."}
+                  </p>
+                </div>
+                {form.id && (
+                  <button
+                    className="icon-button"
+                    type="button"
+                    title="Cancelar edição"
+                    onClick={resetForm}
+                  >
+                    <X size={18} />
+                  </button>
+                )}
+              </div>
+
+              <form className="grid gap-4" onSubmit={saveRecord}>
+                <div className="grid gap-4 md:grid-cols-2">
+                  {activeTab === "client" ? (
+                    <>
+                      <label className="field-label">
+                        Nome
                         <input
-                          className="field-control pl-10"
-                          name="email"
-                          type="email"
-                          placeholder="nome@email.com"
-                          value={form.email}
+                          className="field-control"
+                          name="name"
+                          type="text"
+                          placeholder="Nome completo"
+                          value={form.name}
+                          onChange={updateField}
+                          required
+                        />
+                      </label>
+
+                      <label className="field-label">
+                        E-mail
+                        <span className="relative">
+                          <Mail
+                            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35"
+                            size={17}
+                          />
+                          <input
+                            className="field-control pl-10"
+                            name="email"
+                            type="email"
+                            placeholder="nome@email.com"
+                            value={form.email}
+                            onChange={updateField}
+                          />
+                        </span>
+                      </label>
+
+                      <label className="field-label">
+                        Telefone ou Whatsapp
+                        <input
+                          className="field-control"
+                          name="phone"
+                          type="tel"
+                          inputMode="tel"
+                          maxLength={15}
+                          placeholder="(21) 99999-9999"
+                          value={form.phone}
                           onChange={updateField}
                         />
-                      </span>
-                    </label>
+                      </label>
 
-                    <label className="field-label">
-                      Telefone ou Whatsapp
-                      <input
-                        className="field-control"
-                        name="phone"
-                        type="tel"
-                        inputMode="tel"
-                        maxLength={15}
-                        placeholder="(21) 99999-9999"
-                        value={form.phone}
-                        onChange={updateField}
-                      />
-                    </label>
+                      <label className="field-label">
+                        Condomínio
+                        <input
+                          className="field-control"
+                          name="condominium"
+                          type="text"
+                          placeholder="Nome do condomínio"
+                          value={form.condominium}
+                          onChange={updateField}
+                          required
+                        />
+                      </label>
 
-                    <label className="field-label">
-                      Condomínio
-                      <input
-                        className="field-control"
-                        name="condominium"
-                        type="text"
-                        placeholder="Nome do condomínio"
-                        value={form.condominium}
-                        onChange={updateField}
-                        required
-                      />
-                    </label>
+                      <label className="field-label">
+                        Complemento
+                        <input
+                          className="field-control"
+                          name="complement"
+                          type="text"
+                          placeholder="Bloco, unidade ou referência"
+                          value={form.complement}
+                          onChange={updateField}
+                          required
+                        />
+                      </label>
 
-                    <label className="field-label">
-                      Complemento
-                      <input
-                        className="field-control"
-                        name="complement"
-                        type="text"
-                        placeholder="Bloco, unidade ou referência"
-                        value={form.complement}
-                        onChange={updateField}
-                        required
-                      />
-                    </label>
-
-                    <label className="field-label">
-                      Motivo do contato
-                      <select className="field-control" name="reason" value={form.reason} onChange={updateField} required>
-                        <option value="">Selecione</option>
-                        {clientReasons.map((reason) => (
-                          <option key={reason}>{reason}</option>
-                        ))}
-                      </select>
-                    </label>
-                  </>
-                ) : (
-                  <>
-                <label className="field-label">
-                  Selecione sua Administradora
+                      <label className="field-label">
+                        Motivo do contato
+                        <select
+                          className="field-control"
+                          name="reason"
+                          value={form.reason}
+                          onChange={updateField}
+                          required
+                        >
+                          <option value="">Selecione</option>
+                          {clientReasons.map((reason) => (
+                            <option key={reason}>{reason}</option>
+                          ))}
+                        </select>
+                      </label>
+                    </>
+                  ) : (
+                    <>
+                      <label className="field-label">
+                        Selecione sua Administradora
                   <select
                     className="field-control"
                     name="administrator"
                     value={form.administrator}
                     onChange={updateField}
+                    disabled={profile?.role === "administradora"}
                     required
                   >
                     <option value="">Selecione</option>
@@ -1179,133 +1525,173 @@ function App() {
                       <option key={administrator}>{administrator}</option>
                     ))}
                   </select>
-                </label>
+                      </label>
+
+                      <label className="field-label">
+                        E-mail
+                        <span className="relative">
+                          <Mail
+                            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35"
+                            size={17}
+                          />
+                          <input
+                            className="field-control pl-10"
+                            name="email"
+                            type="email"
+                            placeholder="nome@empresa.com"
+                            value={form.email}
+                            onChange={updateField}
+                            required
+                          />
+                        </span>
+                      </label>
+
+                      <label className="field-label">
+                        Área da Sofico contatada
+                        <select
+                          className="field-control"
+                          name="area"
+                          value={form.area}
+                          onChange={updateField}
+                          required
+                        >
+                          <option value="">Selecione</option>
+                          {areas.map((area) => (
+                            <option key={area}>{area}</option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label className="field-label">
+                        Motivo do contato
+                        <select
+                          className="field-control"
+                          name="reason"
+                          value={form.reason}
+                          onChange={updateField}
+                          required
+                        >
+                          <option value="">Selecione</option>
+                          {administratorReasons.map((reason) => (
+                            <option key={reason}>{reason}</option>
+                          ))}
+                        </select>
+                      </label>
+                    </>
+                  )}
+                </div>
 
                 <label className="field-label">
-                  E-mail
-                  <span className="relative">
-                    <Mail className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35" size={17} />
-                    <input
-                      className="field-control pl-10"
-                      name="email"
-                      type="email"
-                      placeholder="nome@empresa.com"
-                      value={form.email}
-                      onChange={updateField}
-                      required
-                    />
+                  Descrição do caso
+                  <textarea
+                    className="field-area"
+                    name="description"
+                    placeholder="Descreva o contexto, histórico e próximos passos necessários."
+                    value={form.description}
+                    onChange={updateField}
+                    required
+                  />
+                </label>
+
+                <label
+                  className={`grid min-h-40 place-items-center gap-2 rounded-lg border-2 border-dashed p-5 text-center transition ${
+                    isDragging
+                      ? "border-fi-orange bg-fi-orangeSoft"
+                      : "border-violet-200 bg-gradient-to-br from-violet-50 to-white"
+                  }`}
+                  onDragLeave={() => setIsDragging(false)}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    setIsDragging(true);
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    setIsDragging(false);
+                    addFiles(event.dataTransfer.files);
+                  }}
+                >
+                  <input
+                    ref={fileInputRef}
+                    className="sr-only"
+                    type="file"
+                    multiple
+                    onChange={(event) => addFiles(event.target.files)}
+                  />
+                  <span className="inline-flex h-11 w-11 items-center justify-center rounded-lg bg-fi-navy text-white">
+                    <UploadCloud size={22} />
                   </span>
+                  <strong className="text-sm font-black text-fi-navy">
+                    Anexe comprovantes e arquivos úteis
+                  </strong>
+                  <small className="max-w-md text-sm font-medium text-slate-500">
+                    Arraste arquivos para cá ou clique para selecionar
+                    documentos, imagens, PDFs e planilhas.
+                  </small>
                 </label>
 
-                <label className="field-label">
-                  Área da Sofico contatada
-                  <select className="field-control" name="area" value={form.area} onChange={updateField} required>
-                    <option value="">Selecione</option>
-                    {areas.map((area) => (
-                      <option key={area}>{area}</option>
+                {form.attachments.length > 0 && (
+                  <ul className="grid gap-2">
+                    {form.attachments.map((attachment) => (
+                      <li
+                        className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-violet-100 bg-white px-3 py-2"
+                        key={attachment.id}
+                      >
+                        <span className="flex min-w-0 items-center gap-2 text-sm font-bold text-slate-600">
+                          <FileArchive
+                            className="shrink-0 text-fi-orange"
+                            size={17}
+                          />
+                          <span className="truncate">{attachment.name}</span>
+                          <span className="shrink-0 text-xs text-slate-400">
+                            {formatBytes(attachment.size)}
+                          </span>
+                        </span>
+                        <button
+                          className="icon-button shrink-0"
+                          type="button"
+                          onClick={() => removeAttachment(attachment.id)}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </li>
                     ))}
-                  </select>
-                </label>
-
-                <label className="field-label">
-                  Motivo do contato
-                  <select className="field-control" name="reason" value={form.reason} onChange={updateField} required>
-                    <option value="">Selecione</option>
-                    {administratorReasons.map((reason) => (
-                      <option key={reason}>{reason}</option>
-                    ))}
-                  </select>
-                </label>
-                  </>
+                  </ul>
                 )}
-              </div>
 
-              <label className="field-label">
-                Descrição do caso
-                <textarea
-                  className="field-area"
-                  name="description"
-                  placeholder="Descreva o contexto, histórico e próximos passos necessários."
-                  value={form.description}
-                  onChange={updateField}
-                  required
-                />
-              </label>
-
-              <label
-                className={`grid min-h-40 place-items-center gap-2 rounded-lg border-2 border-dashed p-5 text-center transition ${
-                  isDragging
-                    ? "border-fi-orange bg-fi-orangeSoft"
-                    : "border-violet-200 bg-gradient-to-br from-violet-50 to-white"
-                }`}
-                onDragLeave={() => setIsDragging(false)}
-                onDragOver={(event) => {
-                  event.preventDefault();
-                  setIsDragging(true);
-                }}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  setIsDragging(false);
-                  addFiles(event.dataTransfer.files);
-                }}
-              >
-                <input
-                  ref={fileInputRef}
-                  className="sr-only"
-                  type="file"
-                  multiple
-                  onChange={(event) => addFiles(event.target.files)}
-                />
-                <span className="inline-flex h-11 w-11 items-center justify-center rounded-lg bg-fi-navy text-white">
-                  <UploadCloud size={22} />
-                </span>
-                <strong className="text-sm font-black text-fi-navy">Anexe comprovantes e arquivos úteis</strong>
-                <small className="max-w-md text-sm font-medium text-slate-500">
-                  Arraste arquivos para cá ou clique para selecionar documentos, imagens, PDFs e planilhas.
-                </small>
-              </label>
-
-              {form.attachments.length > 0 && (
-                <ul className="grid gap-2">
-                  {form.attachments.map((attachment) => (
-                    <li
-                      className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-violet-100 bg-white px-3 py-2"
-                      key={attachment.id}
-                    >
-                      <span className="flex min-w-0 items-center gap-2 text-sm font-bold text-slate-600">
-                        <FileArchive className="shrink-0 text-fi-orange" size={17} />
-                        <span className="truncate">{attachment.name}</span>
-                        <span className="shrink-0 text-xs text-slate-400">{formatBytes(attachment.size)}</span>
-                      </span>
-                      <button className="icon-button shrink-0" type="button" onClick={() => removeAttachment(attachment.id)}>
-                        <Trash2 size={16} />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-
-              <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
-                <button className="button-secondary" type="button" onClick={resetForm}>
-                  Limpar
-                </button>
-                <button className="button-primary" type="submit">
-                  <Plus size={18} />
-                  {form.id ? "Atualizar contato" : "Salvar contato"}
-                </button>
-              </div>
-            </form>
-          </section>
+                <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
+                  <button
+                    className="button-secondary"
+                    type="button"
+                    onClick={resetForm}
+                  >
+                    Limpar
+                  </button>
+                  <button className="button-primary" type="submit">
+                    <Plus size={18} />
+                    {form.id ? "Atualizar contato" : "Salvar contato"}
+                  </button>
+                </div>
+              </form>
+            </section>
           )}
 
           {activeTab === "operator" && !canAccessOperator(profile) && (
             <section className="mx-auto w-full max-w-xl rounded-lg border border-violet-100 bg-white p-6 shadow-glow">
               <div className="mb-6 text-center">
-                <img className="mx-auto mb-4 h-16 w-16 rounded-lg" src="/fi-logo.png" alt="Logo Sofico" />
-                <p className="text-xs font-black uppercase text-fi-orange">Área do Operador</p>
-                <h2 className="mt-1 text-2xl font-black text-fi-navy">Login do operador</h2>
+                <img
+                  className="mx-auto mb-4 h-16 w-16 rounded-lg"
+                  src="/fi-logo.png"
+                  alt="Logo Sofico"
+                />
+                <p className="text-xs font-black uppercase text-fi-orange">
+                  Área do Operador
+                </p>
+                <h2 className="mt-1 text-2xl font-black text-fi-navy">
+                  Login do operador
+                </h2>
                 <p className="mt-2 text-sm font-semibold text-slate-500">
-                  Entre com o usuário cadastrado no Supabase para acessar as solicitações.
+                  Entre com o usuário cadastrado no Supabase para acessar as
+                  solicitações.
                 </p>
               </div>
 
@@ -1314,7 +1700,11 @@ function App() {
                   <div className="rounded-lg border border-red-100 bg-red-50 px-3 py-3 text-sm font-bold text-red-700">
                     Este usuário não tem permissão de operador.
                   </div>
-                  <button className="button-secondary" type="button" onClick={signOutOperator}>
+                  <button
+                    className="button-secondary"
+                    type="button"
+                    onClick={signOutOperator}
+                  >
                     Sair e entrar com outro usuário
                   </button>
                 </div>
@@ -1356,8 +1746,14 @@ function App() {
                     </div>
                   )}
 
-                  <button className="button-primary" type="submit" disabled={loginLoading}>
-                    {loginLoading ? "Entrando..." : "Entrar na Área do Operador"}
+                  <button
+                    className="button-primary"
+                    type="submit"
+                    disabled={loginLoading}
+                  >
+                    {loginLoading
+                      ? "Entrando..."
+                      : "Entrar na Área do Operador"}
                   </button>
                 </form>
               )}
@@ -1365,140 +1761,210 @@ function App() {
           )}
 
           {activeTab === "operator" && canAccessOperator(profile) && (
-          <section id="records" className="min-w-0 rounded-lg border border-violet-100 bg-white p-5 shadow-glow md:p-6">
-            <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-              <div>
-                <h2 className="text-xl font-black text-fi-navy">Registros</h2>
-                <p className="mt-1 text-sm font-medium text-slate-500">
-                  Pesquise, filtre, edite, exclua e baixe anexos cadastrados.
-                </p>
-              </div>
-              <div className="grid gap-3 md:grid-cols-[minmax(220px,1fr)_minmax(150px,180px)_minmax(150px,180px)] xl:w-full xl:max-w-[760px]">
-                <label className="relative">
-                  <span className="sr-only">Buscar registros</span>
-                  <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35" size={18} />
-                  <input
-                    className="field-control pl-10"
-                    type="search"
-                    placeholder="Buscar por protocolo, nome, e-mail ou motivo"
-                    value={search}
-                    onChange={(event) => setSearch(event.target.value)}
-                  />
-                </label>
-                <label className="relative">
-                  <span className="sr-only">Filtrar por tipo</span>
-                  <Filter className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35" size={18} />
-                  <select className="field-control pl-10" value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
-                    <option value="">Todos os tipos</option>
-                    <option value="client">Clientes</option>
-                    <option value="administrator">Administradoras</option>
-                  </select>
-                </label>
-                <label className="relative">
-                  <span className="sr-only">Filtrar por área</span>
-                  <Filter className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35" size={18} />
-                  <select className="field-control pl-10" value={areaFilter} onChange={(event) => setAreaFilter(event.target.value)}>
-                    <option value="">Todas as áreas</option>
-                    {areas.map((area) => (
-                      <option key={area}>{area}</option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-            </div>
-
-            <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <SummaryCard label="Total filtrado" value={filteredStats.total} />
-              <SummaryCard label="Em aberto" value={filteredStats.pending} accent="orange" />
-              <SummaryCard label="Clientes" value={filteredStats.clients} />
-              <SummaryCard label="Administradoras" value={filteredStats.administrators} accent="orange" />
-            </div>
-
-            <div className="rounded-lg border border-violet-100 bg-violet-50/50 p-3">
-              {recordsLoading && (
-                <div className="mb-3 rounded-lg border border-violet-100 bg-white px-4 py-3 text-sm font-extrabold text-fi-navy">
-                  Carregando solicitações...
+            <section
+              id="records"
+              className="min-w-0 rounded-lg border border-violet-100 bg-white p-5 shadow-glow md:p-6"
+            >
+              <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+                <div>
+                  <h2 className="text-xl font-black text-fi-navy">Registros</h2>
+                  <p className="mt-1 text-sm font-medium text-slate-500">
+                    Pesquise, filtre, edite, exclua e baixe anexos cadastrados.
+                  </p>
                 </div>
-              )}
+                <div className="grid gap-3 md:grid-cols-[minmax(220px,1fr)_minmax(150px,180px)_minmax(150px,180px)] xl:w-full xl:max-w-[760px]">
+                  <label className="relative">
+                    <span className="sr-only">Buscar registros</span>
+                    <Search
+                      className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35"
+                      size={18}
+                    />
+                    <input
+                      className="field-control pl-10"
+                      type="search"
+                      placeholder="Buscar por protocolo, nome, e-mail ou motivo"
+                      value={search}
+                      onChange={(event) => setSearch(event.target.value)}
+                    />
+                  </label>
+                  <label className="relative">
+                    <span className="sr-only">Filtrar por tipo</span>
+                    <Filter
+                      className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35"
+                      size={18}
+                    />
+                    <select
+                      className="field-control pl-10"
+                      value={typeFilter}
+                      onChange={(event) => setTypeFilter(event.target.value)}
+                    >
+                      <option value="">Todos os tipos</option>
+                      <option value="client">Clientes</option>
+                      <option value="administrator">Administradoras</option>
+                    </select>
+                  </label>
+                  <label className="relative">
+                    <span className="sr-only">Filtrar por área</span>
+                    <Filter
+                      className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35"
+                      size={18}
+                    />
+                    <select
+                      className="field-control pl-10"
+                      value={areaFilter}
+                      onChange={(event) => setAreaFilter(event.target.value)}
+                    >
+                      <option value="">Todas as áreas</option>
+                      {areas.map((area) => (
+                        <option key={area}>{area}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              </div>
 
-              <div className="grid gap-3">
-                {filteredRecords.map((record) => (
-                  <article className="rounded-lg border border-violet-100 bg-white p-4 transition hover:border-fi-orange/35" key={record.id}>
-                    <div className="grid min-w-0 gap-3 md:grid-cols-2 2xl:grid-cols-[120px_118px_minmax(0,1.1fr)_minmax(0,1.25fr)_minmax(0,1fr)_150px_220px] 2xl:items-center">
-                      <RecordCell label="Protocolo">
-                        <span className="chip max-w-full bg-fi-orangeSoft text-fi-orange">
-                          <span className="whitespace-normal break-all leading-tight">{record.protocol}</span>
-                        </span>
-                      </RecordCell>
+              <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <SummaryCard
+                  label="Total filtrado"
+                  value={filteredStats.total}
+                />
+                <SummaryCard
+                  label="Em aberto"
+                  value={filteredStats.pending}
+                  accent="orange"
+                />
+                <SummaryCard label="Clientes" value={filteredStats.clients} />
+                <SummaryCard
+                  label="Administradoras"
+                  value={filteredStats.administrators}
+                  accent="orange"
+                />
+              </div>
 
-                      <RecordCell label="Tipo">
-                        <span className="chip max-w-full bg-violet-100 text-fi-navy">
-                          <span className="truncate">{recordTypes[record.type]}</span>
-                        </span>
-                      </RecordCell>
+              <div className="rounded-lg border border-violet-100 bg-violet-50/50 p-3">
+                {recordsLoading && (
+                  <div className="mb-3 rounded-lg border border-violet-100 bg-white px-4 py-3 text-sm font-extrabold text-fi-navy">
+                    Carregando solicitações...
+                  </div>
+                )}
 
-                      <RecordCell label="Solicitante">
-                        <strong className="block truncate text-sm font-black text-fi-navy">
-                          {record.type === "client" ? record.name : record.administrator}
-                        </strong>
-                        <span className="block truncate text-xs font-semibold text-slate-400">{formatDate(record.createdAt)}</span>
-                      </RecordCell>
+                <div className="grid gap-3">
+                  {filteredRecords.map((record) => (
+                    <article
+                      className="rounded-lg border border-violet-100 bg-white p-4 transition hover:border-fi-orange/35"
+                      key={record.id}
+                    >
+                      <div className="grid min-w-0 gap-3 md:grid-cols-2 2xl:grid-cols-[120px_118px_minmax(0,1.1fr)_minmax(0,1.25fr)_minmax(0,1fr)_150px_220px] 2xl:items-center">
+                        <RecordCell label="Protocolo">
+                          <span className="chip max-w-full bg-fi-orangeSoft text-fi-orange">
+                            <span className="whitespace-normal break-all leading-tight">
+                              {record.protocol}
+                            </span>
+                          </span>
+                        </RecordCell>
 
-                      <RecordCell label="E-mail">
-                        <span className="block truncate text-sm font-semibold text-slate-600">{record.email}</span>
-                      </RecordCell>
+                        <RecordCell label="Tipo">
+                          <span className="chip max-w-full bg-violet-100 text-fi-navy">
+                            <span className="truncate">
+                              {recordTypes[record.type]}
+                            </span>
+                          </span>
+                        </RecordCell>
 
-                      <RecordCell label="Motivo">
-                        <span className="block truncate text-sm font-semibold text-slate-600">{record.reason}</span>
-                        <span className="mt-1 inline-flex max-w-full text-xs font-bold text-fi-navy/55">
-                          <span className="truncate">{record.area || "Sem área"}</span>
-                        </span>
-                      </RecordCell>
+                        <RecordCell label="Solicitante">
+                          <strong className="block truncate text-sm font-black text-fi-navy">
+                            {record.type === "client"
+                              ? record.name
+                              : record.administrator}
+                          </strong>
+                          <span className="block truncate text-xs font-semibold text-slate-400">
+                            {formatDate(record.createdAt)}
+                          </span>
+                        </RecordCell>
 
-                      <RecordCell label="Status">
-                        <select
-                          className="field-control min-h-9 text-xs font-extrabold"
-                          value={record.status}
-                          onChange={(event) => updateStatus(record.id, event.target.value)}
-                        >
-                          {statuses.map((status) => (
-                            <option key={status}>{status}</option>
-                          ))}
-                        </select>
-                      </RecordCell>
+                        <RecordCell label="E-mail">
+                          <span className="block truncate text-sm font-semibold text-slate-600">
+                            {record.email}
+                          </span>
+                        </RecordCell>
 
-                      <div className="grid min-w-0 gap-2 sm:grid-cols-[auto_1fr] sm:items-center 2xl:grid-cols-[auto_auto] 2xl:justify-end">
-                        <span className="chip max-w-max bg-fi-orangeSoft text-fi-orange">{record.attachments.length} anexos</span>
-                        <div className="flex flex-wrap gap-2 sm:justify-end">
-                          <button className="icon-button" type="button" title="Ver" onClick={() => setSelectedRecord(record)}>
-                            <Eye size={16} />
-                          </button>
-                          <button className="icon-button" type="button" title="Editar" onClick={() => editRecord(record)}>
-                            <Pencil size={16} />
-                          </button>
-                          <button className="icon-button" type="button" title="Excluir" onClick={() => deleteRecord(record.id)}>
-                            <Trash2 size={16} />
-                          </button>
+                        <RecordCell label="Motivo">
+                          <span className="block truncate text-sm font-semibold text-slate-600">
+                            {record.reason}
+                          </span>
+                          <span className="mt-1 inline-flex max-w-full text-xs font-bold text-fi-navy/55">
+                            <span className="truncate">
+                              {record.area || "Sem área"}
+                            </span>
+                          </span>
+                        </RecordCell>
+
+                        <RecordCell label="Status">
+                          <select
+                            className="field-control min-h-9 text-xs font-extrabold"
+                            value={record.status}
+                            onChange={(event) =>
+                              updateStatus(record.id, event.target.value)
+                            }
+                          >
+                            {statuses.map((status) => (
+                              <option key={status}>{status}</option>
+                            ))}
+                          </select>
+                        </RecordCell>
+
+                        <div className="grid min-w-0 gap-2 sm:grid-cols-[auto_1fr] sm:items-center 2xl:grid-cols-[auto_auto] 2xl:justify-end">
+                          <span className="chip max-w-max bg-fi-orangeSoft text-fi-orange">
+                            {record.attachments.length} anexos
+                          </span>
+                          <div className="flex flex-wrap gap-2 sm:justify-end">
+                            <button
+                              className="icon-button"
+                              type="button"
+                              title="Ver"
+                              onClick={() => setSelectedRecord(record)}
+                            >
+                              <Eye size={16} />
+                            </button>
+                            <button
+                              className="icon-button"
+                              type="button"
+                              title="Editar"
+                              onClick={() => editRecord(record)}
+                            >
+                              <Pencil size={16} />
+                            </button>
+                            <button
+                              className="icon-button"
+                              type="button"
+                              title="Excluir"
+                              onClick={() => deleteRecord(record.id)}
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  </article>
-                ))}
-              </div>
-
-              {filteredRecords.length === 0 && (
-                <div className="grid min-h-52 place-items-center gap-2 px-6 py-12 text-center">
-                  <div className="inline-flex h-12 w-12 items-center justify-center rounded-lg bg-fi-orangeSoft text-fi-orange">
-                    <FileText size={24} />
-                  </div>
-                  <strong className="text-fi-navy">Nenhum contato encontrado</strong>
-                  <span className="max-w-sm text-sm font-medium text-slate-500">
-                    Cadastre o primeiro caso ou ajuste a busca e o filtro de área.
-                  </span>
+                    </article>
+                  ))}
                 </div>
-              )}
-            </div>
-          </section>
+
+                {filteredRecords.length === 0 && (
+                  <div className="grid min-h-52 place-items-center gap-2 px-6 py-12 text-center">
+                    <div className="inline-flex h-12 w-12 items-center justify-center rounded-lg bg-fi-orangeSoft text-fi-orange">
+                      <FileText size={24} />
+                    </div>
+                    <strong className="text-fi-navy">
+                      Nenhum contato encontrado
+                    </strong>
+                    <span className="max-w-sm text-sm font-medium text-slate-500">
+                      Cadastre o primeiro caso ou ajuste a busca e o filtro de
+                      área.
+                    </span>
+                  </div>
+                )}
+              </div>
+            </section>
           )}
         </div>
       </main>
@@ -1508,12 +1974,21 @@ function App() {
           <article className="modal-scroll max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-lg bg-white p-5 shadow-xl md:p-6">
             <header className="mb-5 flex items-start justify-between gap-4">
               <div>
-                <p className="text-xs font-black uppercase text-fi-orange">Detalhes do contato</p>
+                <p className="text-xs font-black uppercase text-fi-orange">
+                  Detalhes do contato
+                </p>
                 <h2 className="text-2xl font-black text-fi-navy">
-                  {selectedRecord.protocol} · {selectedRecord.type === "client" ? selectedRecord.name : selectedRecord.administrator}
+                  {selectedRecord.protocol} ·{" "}
+                  {selectedRecord.type === "client"
+                    ? selectedRecord.name
+                    : selectedRecord.administrator}
                 </h2>
               </div>
-              <button className="icon-button" type="button" onClick={() => setSelectedRecord(null)}>
+              <button
+                className="icon-button"
+                type="button"
+                onClick={() => setSelectedRecord(null)}
+              >
                 <X size={18} />
               </button>
             </header>
@@ -1522,11 +1997,15 @@ function App() {
               <Detail label="Protocolo" value={selectedRecord.protocol} />
               <Detail label="Tipo" value={recordTypes[selectedRecord.type]} />
               <div className="rounded-lg border border-violet-100 bg-violet-50/65 p-4">
-                <span className="text-xs font-black uppercase text-fi-navy/55">Status</span>
+                <span className="text-xs font-black uppercase text-fi-navy/55">
+                  Status
+                </span>
                 <select
                   className="field-control mt-2"
                   value={selectedRecord.status}
-                  onChange={(event) => updateStatus(selectedRecord.id, event.target.value)}
+                  onChange={(event) =>
+                    updateStatus(selectedRecord.id, event.target.value)
+                  }
                 >
                   {statuses.map((status) => (
                     <option key={status}>{status}</option>
@@ -1536,21 +2015,47 @@ function App() {
               {selectedRecord.type === "client" ? (
                 <>
                   <Detail label="Nome" value={selectedRecord.name} />
-                  <Detail label="Telefone ou Whatsapp" value={selectedRecord.phone} />
-                  <Detail label="Condomínio" value={selectedRecord.condominium} />
-                  <Detail label="Complemento" value={selectedRecord.complement || "-"} />
+                  <Detail
+                    label="Telefone ou Whatsapp"
+                    value={selectedRecord.phone}
+                  />
+                  <Detail
+                    label="Condomínio"
+                    value={selectedRecord.condominium}
+                  />
+                  <Detail
+                    label="Complemento"
+                    value={selectedRecord.complement || "-"}
+                  />
                 </>
               ) : (
-                <Detail label="Administradora" value={selectedRecord.administrator} />
+                <Detail
+                  label="Administradora"
+                  value={selectedRecord.administrator}
+                />
               )}
               <Detail label="E-mail" value={selectedRecord.email} />
-              {selectedRecord.type === "administrator" && <Detail label="Área" value={selectedRecord.area} />}
+              {selectedRecord.type === "administrator" && (
+                <Detail label="Área" value={selectedRecord.area} />
+              )}
               <Detail label="Motivo" value={selectedRecord.reason} />
-              <Detail label="Descrição do caso" value={selectedRecord.description} wide />
-              <Detail label="Criado em" value={formatDate(selectedRecord.createdAt)} />
-              <Detail label="Atualizado em" value={formatDate(selectedRecord.updatedAt)} />
+              <Detail
+                label="Descrição do caso"
+                value={selectedRecord.description}
+                wide
+              />
+              <Detail
+                label="Criado em"
+                value={formatDate(selectedRecord.createdAt)}
+              />
+              <Detail
+                label="Atualizado em"
+                value={formatDate(selectedRecord.updatedAt)}
+              />
               <div className="rounded-lg border border-violet-100 bg-violet-50/65 p-4 md:col-span-2">
-                <span className="text-xs font-black uppercase text-fi-navy/55">Anexos</span>
+                <span className="text-xs font-black uppercase text-fi-navy/55">
+                  Anexos
+                </span>
                 <div className="mt-3 grid gap-2">
                   {selectedRecord.attachments.length > 0 ? (
                     selectedRecord.attachments.map((attachment) => (
@@ -1562,22 +2067,34 @@ function App() {
                       >
                         <Download size={16} />
                         <span className="truncate">{attachment.name}</span>
-                        <span className="ml-auto shrink-0 text-xs text-slate-400">{formatBytes(attachment.size)}</span>
+                        <span className="ml-auto shrink-0 text-xs text-slate-400">
+                          {formatBytes(attachment.size)}
+                        </span>
                       </a>
                     ))
                   ) : (
-                    <p className="m-0 text-sm font-semibold text-slate-500">Nenhum anexo cadastrado.</p>
+                    <p className="m-0 text-sm font-semibold text-slate-500">
+                      Nenhum anexo cadastrado.
+                    </p>
                   )}
                 </div>
               </div>
             </div>
 
             <footer className="mt-5 flex flex-col gap-3 sm:flex-row sm:justify-end">
-              <button className="button-secondary" type="button" onClick={() => editRecord(selectedRecord)}>
+              <button
+                className="button-secondary"
+                type="button"
+                onClick={() => editRecord(selectedRecord)}
+              >
                 <Pencil size={18} />
                 Editar
               </button>
-              <button className="button-primary" type="button" onClick={() => setSelectedRecord(null)}>
+              <button
+                className="button-primary"
+                type="button"
+                onClick={() => setSelectedRecord(null)}
+              >
                 Fechar
               </button>
             </footer>
@@ -1587,11 +2104,122 @@ function App() {
 
       <div
         className={`fixed bottom-5 right-5 z-50 max-w-[calc(100vw-2.5rem)] rounded-lg bg-fi-navy px-4 py-3 text-sm font-extrabold text-white shadow-2xl transition ${
-          toast ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-4 opacity-0"
+          toast
+            ? "translate-y-0 opacity-100"
+            : "pointer-events-none translate-y-4 opacity-0"
         }`}
       >
         {toast}
       </div>
+
+      {showCreateUserModal && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 p-4">
+          <div className="max-w-md w-full rounded-lg bg-white p-6 shadow-2xl">
+            <h2 className="mb-4 text-2xl font-black text-fi-navy">
+              Cadastrar Novo Usuário
+            </h2>
+            <form className="grid gap-4" onSubmit={createNewUser}>
+              <div>
+                <label className="block text-xs font-black uppercase text-fi-navy/55 mb-2">
+                  Email
+                </label>
+                <input
+                  type="email"
+                  value={createUserForm.email}
+                  onChange={(e) =>
+                    setCreateUserForm({
+                      ...createUserForm,
+                      email: e.target.value,
+                    })
+                  }
+                  required
+                  className="w-full rounded-lg border border-violet-100 bg-white px-3 py-2 text-sm font-medium placeholder-gray-400 outline-none transition focus:border-fi-orange focus:ring-1 focus:ring-fi-orange"
+                  placeholder="seu-email@example.com"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-black uppercase text-fi-navy/55 mb-2">
+                  Senha
+                </label>
+                <input
+                  type="password"
+                  value={createUserForm.password}
+                  onChange={(e) =>
+                    setCreateUserForm({
+                      ...createUserForm,
+                      password: e.target.value,
+                    })
+                  }
+                  required
+                  className="w-full rounded-lg border border-violet-100 bg-white px-3 py-2 text-sm font-medium placeholder-gray-400 outline-none transition focus:border-fi-orange focus:ring-1 focus:ring-fi-orange"
+                  placeholder="••••••••"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-black uppercase text-fi-navy/55 mb-2">
+                  Nível de Acesso
+                </label>
+                <select
+                  value={createUserForm.role}
+                  onChange={(e) =>
+                    setCreateUserForm({
+                      ...createUserForm,
+                      role: e.target.value as "administradora" | "operador",
+                    })
+                  }
+                  className="w-full rounded-lg border border-violet-100 bg-white px-3 py-2 text-sm font-medium outline-none transition focus:border-fi-orange focus:ring-1 focus:ring-fi-orange"
+                >
+                  <option value="administradora">Administradora</option>
+                  <option value="operador">Operador</option>
+                </select>
+              </div>
+
+              {createUserForm.role === "administradora" && (
+                <div>
+                  <label className="block text-xs font-black uppercase text-fi-navy/55 mb-2">
+                    Administradora
+                  </label>
+                  <select
+                    value={createUserForm.administradora}
+                    onChange={(e) =>
+                      setCreateUserForm({
+                        ...createUserForm,
+                        administradora: e.target.value,
+                      })
+                    }
+                    className="w-full rounded-lg border border-violet-100 bg-white px-3 py-2 text-sm font-medium placeholder-gray-400 outline-none transition focus:border-fi-orange focus:ring-1 focus:ring-fi-orange"
+                    required
+                  >
+                    <option value="">Selecione</option>
+                    {administrators.map((administrator) => (
+                      <option key={administrator}>{administrator}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowCreateUserModal(false)}
+                  className="button-secondary flex-1"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={createUserLoading}
+                  className="button-primary flex-1"
+                >
+                  {createUserLoading ? "Criando..." : "Criar"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1610,7 +2238,9 @@ type RecordCellProps = {
 function RecordCell({ label, children }: RecordCellProps) {
   return (
     <div className="min-w-0">
-      <span className="mb-1 block truncate text-[0.68rem] font-black uppercase text-fi-navy/45">{label}</span>
+      <span className="mb-1 block truncate text-[0.68rem] font-black uppercase text-fi-navy/45">
+        {label}
+      </span>
       {children}
     </div>
   );
@@ -1620,7 +2250,9 @@ function RecordCell({ label, children }: RecordCellProps) {
 function Metric({ label, value }: MetricProps) {
   return (
     <div className="rounded-lg border border-white/12 bg-white/8 p-4">
-      <span className="text-xs font-black uppercase text-white/55">{label}</span>
+      <span className="text-xs font-black uppercase text-white/55">
+        {label}
+      </span>
       <strong className="mt-1 block text-3xl font-black">{value}</strong>
     </div>
   );
@@ -1634,11 +2266,16 @@ type SummaryCardProps = {
 
 // Indicadores da área do operador, sempre baseados nos filtros atuais.
 function SummaryCard({ label, value, accent = "navy" }: SummaryCardProps) {
-  const colorClass = accent === "orange" ? "bg-fi-orangeSoft text-fi-orange" : "bg-violet-100 text-fi-navy";
+  const colorClass =
+    accent === "orange"
+      ? "bg-fi-orangeSoft text-fi-orange"
+      : "bg-violet-100 text-fi-navy";
 
   return (
     <div className="rounded-lg border border-violet-100 bg-white p-4">
-      <span className="text-xs font-black uppercase text-slate-400">{label}</span>
+      <span className="text-xs font-black uppercase text-slate-400">
+        {label}
+      </span>
       <div className="mt-2 flex items-center justify-between">
         <strong className="text-3xl font-black text-fi-navy">{value}</strong>
         <span className={`h-3 w-3 rounded-full ${colorClass}`} />
@@ -1656,9 +2293,15 @@ type DetailProps = {
 // Bloco de detalhe do modal; aceita conteúdo longo sem empurrar o layout.
 function Detail({ label, value, wide }: DetailProps) {
   return (
-    <div className={`rounded-lg border border-violet-100 bg-violet-50/65 p-4 ${wide ? "md:col-span-2" : ""}`}>
-      <span className="text-xs font-black uppercase text-fi-navy/55">{label}</span>
-      <p className="mt-2 whitespace-pre-wrap break-words text-sm font-semibold text-fi-ink">{value}</p>
+    <div
+      className={`rounded-lg border border-violet-100 bg-violet-50/65 p-4 ${wide ? "md:col-span-2" : ""}`}
+    >
+      <span className="text-xs font-black uppercase text-fi-navy/55">
+        {label}
+      </span>
+      <p className="mt-2 whitespace-pre-wrap break-words text-sm font-semibold text-fi-ink">
+        {value}
+      </p>
     </div>
   );
 }
