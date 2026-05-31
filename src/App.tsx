@@ -15,9 +15,31 @@ import {
 } from "lucide-react";
 import React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import logoUrl from "../public/fi-logo.png";
 import { supabase } from "./supabaseClient";
 
 const ATTACHMENTS_BUCKET = "solicitacao-anexos";
+const MAX_ATTACHMENTS_PER_RECORD = 5;
+const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
+const ALLOWED_ATTACHMENT_EXTENSIONS = [
+  "pdf",
+  "png",
+  "jpg",
+  "jpeg",
+  "doc",
+  "docx",
+  "xls",
+  "xlsx",
+];
+const ALLOWED_ATTACHMENT_MIME_TYPES = [
+  "application/pdf",
+  "image/png",
+  "image/jpeg",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+];
 
 // Tipos centrais do fluxo: cliente, administradora, operador e registros compartilhados.
 type RecordType = "client" | "administrator";
@@ -266,6 +288,31 @@ function sanitizeFileName(name: string) {
     .replace(/-+/g, "-");
 }
 
+function getFileExtension(name: string) {
+  return name.split(".").pop()?.toLowerCase() || "";
+}
+
+function isAllowedAttachmentType(name: string, type: string) {
+  return (
+    ALLOWED_ATTACHMENT_EXTENSIONS.includes(getFileExtension(name)) &&
+    (!type || ALLOWED_ATTACHMENT_MIME_TYPES.includes(type))
+  );
+}
+
+function makeUploadToken() {
+  return globalThis.crypto?.randomUUID
+    ? `${globalThis.crypto.randomUUID()}-${globalThis.crypto.randomUUID()}`
+    : `${makeId()}-${makeId()}-${Date.now()}`;
+}
+
+async function sha256Hex(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  const hash = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(hash))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 function dataUrlToBlob(dataUrl: string) {
   const [header, base64] = dataUrl.split(",");
   const mime =
@@ -300,7 +347,10 @@ function fileToAttachment(file: File): Promise<Attachment> {
   });
 }
 
-async function uploadRecordAttachments(record: SolicitationRecord) {
+async function uploadRecordAttachments(
+  record: SolicitationRecord,
+  uploadToken?: string,
+) {
   const uploadedAttachments: Attachment[] = [];
 
   for (const attachment of record.attachments) {
@@ -310,12 +360,35 @@ async function uploadRecordAttachments(record: SolicitationRecord) {
     }
 
     const path = `${record.protocol}/${attachment.id}-${sanitizeFileName(attachment.name)}`;
+    const { data: signedUpload, error: signedUploadError } =
+      await supabase.functions.invoke("create-attachment-upload", {
+        body: {
+          protocol: record.protocol,
+          path,
+          name: attachment.name,
+          type: attachment.type,
+          size: attachment.size,
+          recordType: record.type,
+          uploadToken,
+        },
+      });
+
+    if (signedUploadError || signedUpload?.error) {
+      throw new Error(
+        await getFunctionErrorMessage(signedUploadError, signedUpload),
+      );
+    }
+
     const { error } = await supabase.storage
       .from(ATTACHMENTS_BUCKET)
-      .upload(path, dataUrlToBlob(attachment.dataUrl), {
-        contentType: attachment.type,
-        upsert: true,
-      });
+      .uploadToSignedUrl(
+        signedUpload.path,
+        signedUpload.token,
+        dataUrlToBlob(attachment.dataUrl),
+        {
+          contentType: attachment.type,
+        },
+      );
 
     if (error) {
       throw error;
@@ -361,7 +434,10 @@ async function fetchRecordAttachments(protocol: string): Promise<Attachment[]> {
 }
 
 // Payload JSON esperado pelo Pipefy para abertura de solicitações da Área do Cliente.
-function buildClientWebhookPayload(record: SolicitationRecord) {
+function buildClientWebhookPayload(
+  record: SolicitationRecord,
+  uploadToken: string,
+) {
   return {
     source: "sofico_area_cliente",
     event: "client_solicitation_created",
@@ -387,28 +463,76 @@ function buildClientWebhookPayload(record: SolicitationRecord) {
       size: attachment.size,
     })),
     createdAt: record.createdAt,
+    uploadToken,
   };
 }
 
-// Envia somente JSON ao webhook; se o endpoint exigir segredo, o ideal é mover isso para uma Edge Function.
-async function sendClientWebhook(record: SolicitationRecord) {
-  const webhookUrl = import.meta.env.VITE_PIPEFY_CLIENT_WEBHOOK_URL;
-
-  if (!webhookUrl) {
-    return;
-  }
-
-  const response = await fetch(webhookUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+// Envia somente JSON para a Edge Function; a URL/segredo do Pipefy ficam no servidor.
+async function sendClientWebhook(record: SolicitationRecord, uploadToken: string) {
+  const { data, error } = await supabase.functions.invoke(
+    "client-solicitation-webhook",
+    {
+      body: buildClientWebhookPayload(record, uploadToken),
     },
-    body: JSON.stringify(buildClientWebhookPayload(record)),
-  });
+  );
 
-  if (!response.ok) {
-    throw new Error(`Webhook Pipefy respondeu com status ${response.status}.`);
+  if (error || data?.error) {
+    throw new Error(await getFunctionErrorMessage(error, data));
   }
+}
+
+function validateAttachments(attachments: Attachment[]) {
+  if (attachments.length > MAX_ATTACHMENTS_PER_RECORD) {
+    return `Anexe no máximo ${MAX_ATTACHMENTS_PER_RECORD} arquivos por solicitação.`;
+  }
+
+  const oversizedAttachment = attachments.find(
+    (attachment) => attachment.size > MAX_ATTACHMENT_SIZE_BYTES,
+  );
+
+  if (oversizedAttachment) {
+    return `${oversizedAttachment.name} ultrapassa o limite de ${formatBytes(MAX_ATTACHMENT_SIZE_BYTES)}.`;
+  }
+
+  const disallowedAttachment = attachments.find(
+    (attachment) =>
+      !isAllowedAttachmentType(attachment.name, attachment.type),
+  );
+
+  if (disallowedAttachment) {
+    return `${disallowedAttachment.name} não é um tipo de arquivo permitido. Use PDF, imagens, Word ou Excel.`;
+  }
+
+  return "";
+}
+
+function validateIncomingFiles(
+  currentAttachments: Attachment[],
+  incomingFiles: File[],
+) {
+  const totalAttachments = currentAttachments.length + incomingFiles.length;
+
+  if (totalAttachments > MAX_ATTACHMENTS_PER_RECORD) {
+    return `Você pode anexar até ${MAX_ATTACHMENTS_PER_RECORD} arquivos por solicitação.`;
+  }
+
+  const oversizedFile = incomingFiles.find(
+    (file) => file.size > MAX_ATTACHMENT_SIZE_BYTES,
+  );
+
+  if (oversizedFile) {
+    return `${oversizedFile.name} ultrapassa o limite de ${formatBytes(MAX_ATTACHMENT_SIZE_BYTES)}.`;
+  }
+
+  const disallowedFile = incomingFiles.find(
+    (file) => !isAllowedAttachmentType(file.name, file.type),
+  );
+
+  if (disallowedFile) {
+    return `${disallowedFile.name} não é um tipo de arquivo permitido. Use PDF, imagens, Word ou Excel.`;
+  }
+
+  return "";
 }
 
 function canAccessAdministrator(profile: UserProfile | null) {
@@ -473,6 +597,7 @@ function App() {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [recordsLoading, setRecordsLoading] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
+  const [profileLoading, setProfileLoading] = useState(false);
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState("");
@@ -507,6 +632,7 @@ function App() {
 
     supabase.auth.getSession().then(({ data }) => {
       if (!mounted) return;
+      setProfileLoading(Boolean(data.session?.user?.id));
       setSession(data.session);
       setAuthLoading(false);
     });
@@ -514,6 +640,7 @@ function App() {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, currentSession) => {
+      setProfileLoading(Boolean(currentSession?.user?.id));
       setSession(currentSession);
       setAuthLoading(false);
 
@@ -521,6 +648,7 @@ function App() {
         setActiveTab("client");
         setSelectedRecord(null);
         setProfile(null);
+        setProfileLoading(false);
         setRecords([]);
       }
     });
@@ -532,11 +660,15 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let mounted = true;
+
     if (!session?.user?.id) {
       setProfile(null);
+      setProfileLoading(false);
       return;
     }
 
+    setProfileLoading(true);
     supabase
       .from("profiles")
       .select("id,email,role,administradora")
@@ -554,22 +686,31 @@ function App() {
           error = fallback.error;
         }
 
+        if (!mounted) return;
+
         if (error) {
           console.error("Erro ao carregar perfil do usuário:", error);
           setProfile(null);
+          setProfileLoading(false);
           return;
         }
 
         if (!data) {
           console.warn("Usuário autenticado sem linha em public.profiles:", session.user.email);
           setProfile(null);
+          setProfileLoading(false);
           return;
         }
 
         const loadedProfile = data as UserProfile;
         loadedProfile.administradora = loadedProfile.administradora || loadedProfile.administrador || null;
         setProfile(loadedProfile);
+        setProfileLoading(false);
       });
+
+    return () => {
+      mounted = false;
+    };
   }, [session]);
 
   async function refreshRecords() {
@@ -653,11 +794,17 @@ function App() {
       setPendingOperatorTab(false);
     }
 
-    if (pendingOperatorTab && session && profile === null && !authLoading) {
+    if (
+      pendingOperatorTab &&
+      session &&
+      profile === null &&
+      !authLoading &&
+      !profileLoading
+    ) {
       setLoginError("Login feito, mas este usuário não tem perfil/role em public.profiles.");
       setPendingOperatorTab(false);
     }
-  }, [pendingOperatorTab, profile, session, authLoading]);
+  }, [pendingOperatorTab, profile, session, authLoading, profileLoading]);
 
   // Filtros do operador ficam memoizados para evitar recálculo desnecessário ao digitar.
   const filteredRecords = useMemo(() => {
@@ -745,7 +892,7 @@ function App() {
         <div className="max-w-xl rounded-lg border border-violet-100 bg-white p-6 text-center shadow-glow">
           <img
             className="mx-auto mb-4 h-16 w-16 rounded-lg"
-            src="/fi-logo.png"
+            src={logoUrl}
             alt="Logo Sofico"
           />
           <h1 className="text-2xl font-black text-fi-navy">
@@ -845,8 +992,21 @@ function App() {
   }
 
   async function addFiles(files) {
-    const incomingFiles = Array.from(files);
+    const incomingFiles = Array.from(files || []) as File[];
     if (!incomingFiles.length) return;
+
+    const validationError = validateIncomingFiles(
+      form.attachments,
+      incomingFiles,
+    );
+
+    if (validationError) {
+      setToast(validationError);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+      return;
+    }
 
     const convertedFiles = await Promise.all(
       incomingFiles.map(fileToAttachment),
@@ -901,8 +1061,18 @@ function App() {
       }
     }
 
+    const attachmentValidationError = validateAttachments(form.attachments);
+
+    if (attachmentValidationError) {
+      setToast(attachmentValidationError);
+      return;
+    }
+
     const now = new Date().toISOString();
     const isNewRecord = !form.id;
+    const uploadToken =
+      isNewRecord && form.type === "client" ? makeUploadToken() : "";
+    const uploadTokenHash = uploadToken ? await sha256Hex(uploadToken) : "";
     const record: SolicitationRecord = {
       ...form,
       id: form.id || makeId(),
@@ -925,13 +1095,22 @@ function App() {
       let recordToPersist = record;
 
       if (isNewRecord) {
+        const dbRecord: Record<string, unknown> =
+          mapSolicitationToDb(recordToPersist);
         const { error } = await supabase
           .from("solicitacoes")
-          .insert(mapSolicitationToDb(recordToPersist));
+          .insert(
+            uploadTokenHash
+              ? { ...dbRecord, upload_token_hash: uploadTokenHash }
+              : dbRecord,
+          );
         if (error) throw error;
 
         try {
-          const attachments = await uploadRecordAttachments(recordToPersist);
+          const attachments = await uploadRecordAttachments(
+            recordToPersist,
+            uploadToken,
+          );
           recordToPersist = { ...recordToPersist, attachments };
         } catch (error) {
           console.error(
@@ -966,7 +1145,7 @@ function App() {
 
       if (isNewRecord && recordToPersist.type === "client") {
         try {
-          await sendClientWebhook(recordToPersist);
+          await sendClientWebhook(recordToPersist, uploadToken);
           setToast(
             `Contato cadastrado e enviado ao Pipefy. Protocolo: ${recordToPersist.protocol}.`,
           );
@@ -1130,7 +1309,7 @@ function App() {
         <div className="flex items-center gap-4 px-7 py-7">
           <img
             className="h-14 w-14 rounded-lg"
-            src="/fi-logo.png"
+            src={logoUrl}
             alt="Logo Sofico"
           />
           <div>
@@ -1218,7 +1397,7 @@ function App() {
             <div className="flex items-center gap-4">
               <img
                 className="h-12 w-12 rounded-lg lg:hidden"
-                src="/fi-logo.png"
+                src={logoUrl}
                 alt="Logo Sofico"
               />
               <div>
@@ -1335,7 +1514,7 @@ function App() {
                 <div className="mb-6 text-center">
                   <img
                     className="mx-auto mb-4 h-16 w-16 rounded-lg"
-                    src="/fi-logo.png"
+                    src={logoUrl}
                     alt="Logo Sofico"
                   />
                   <p className="text-xs font-black uppercase text-fi-orange">
@@ -1635,6 +1814,7 @@ function App() {
                     ref={fileInputRef}
                     className="sr-only"
                     type="file"
+                    accept=".pdf,.png,.jpg,.jpeg,.doc,.docx,.xls,.xlsx"
                     multiple
                     onChange={(event) => addFiles(event.target.files)}
                   />
@@ -1646,7 +1826,8 @@ function App() {
                   </strong>
                   <small className="max-w-md text-sm font-medium text-slate-500">
                     Arraste arquivos para cá ou clique para selecionar
-                    documentos, imagens, PDFs e planilhas.
+                    PDFs, imagens, Word e Excel. Limite de 5 arquivos, 10 MB
+                    cada.
                   </small>
                 </label>
 
@@ -1701,7 +1882,7 @@ function App() {
               <div className="mb-6 text-center">
                 <img
                   className="mx-auto mb-4 h-16 w-16 rounded-lg"
-                  src="/fi-logo.png"
+                  src={logoUrl}
                   alt="Logo Sofico"
                 />
                 <p className="text-xs font-black uppercase text-fi-orange">
