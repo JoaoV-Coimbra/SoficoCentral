@@ -23,15 +23,18 @@ type ClientWebhookPayload = {
     name?: string;
     type?: string;
     size?: number;
+    path?: string;
   }>;
   createdAt?: string;
   uploadToken?: string;
 };
 
+const ATTACHMENTS_BUCKET = "solicitacao-anexos";
 const MAX_ATTACHMENTS = 5;
 const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
 const MAX_TEXT_LENGTH = 4000;
 const PUBLIC_CLIENT_WEBHOOK_WINDOW_MS = 30 * 60 * 1000;
+const SIGNED_URL_EXPIRES_IN_SECONDS = 60 * 60 * 24 * 30;
 const ALLOWED_ATTACHMENT_EXTENSIONS = [
   "pdf",
   "png",
@@ -84,10 +87,30 @@ function getFileExtension(name: string) {
   return name.split(".").pop()?.toLowerCase() || "";
 }
 
+function sanitizeFileName(name: string) {
+  return name
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9._-]/g, "-")
+    .replace(/-+/g, "-");
+}
+
 function isAllowedAttachmentType(name: string, type: string) {
   return (
     ALLOWED_ATTACHMENT_EXTENSIONS.includes(getFileExtension(name)) &&
     (!type || ALLOWED_ATTACHMENT_MIME_TYPES.includes(type))
+  );
+}
+
+function isValidAttachmentPath(protocol: string, path: string, name: string) {
+  const fileNameFromPath = path.split("/").pop() || "";
+  const sanitizedFileName = sanitizeFileName(name);
+
+  return (
+    path.startsWith(`${protocol}/`) &&
+    !path.includes("..") &&
+    path === `${protocol}/${sanitizeFileName(fileNameFromPath)}` &&
+    fileNameFromPath.endsWith(`-${sanitizedFileName}`)
   );
 }
 
@@ -153,7 +176,76 @@ function validatePayload(payload: ClientWebhookPayload) {
     return `O anexo ${disallowedAttachment.name || ""} não é permitido.`;
   }
 
+  const invalidPathAttachment = (payload.attachments || []).find(
+    (attachment) =>
+      !isShortText(attachment.path, 500) ||
+      !isValidAttachmentPath(
+        String(payload.protocol || ""),
+        String(attachment.path || ""),
+        String(attachment.name || ""),
+      ),
+  );
+
+  if (invalidPathAttachment) {
+    return `O caminho do anexo ${invalidPathAttachment.name || ""} é inválido.`;
+  }
+
   return "";
+}
+
+async function buildPipefyPayload(
+  adminClient: ReturnType<typeof createClient>,
+  payload: ClientWebhookPayload,
+) {
+  const { uploadToken: _uploadToken, ...payloadWithoutToken } = payload;
+  const attachments = payload.attachments || [];
+
+  if (!attachments.length) {
+    return payloadWithoutToken;
+  }
+
+  const paths = attachments.map((attachment) => String(attachment.path || ""));
+  const { data: signedUrls, error } = await adminClient.storage
+    .from(ATTACHMENTS_BUCKET)
+    .createSignedUrls(paths, SIGNED_URL_EXPIRES_IN_SECONDS, {
+      download: true,
+    });
+
+  if (error) {
+    throw error;
+  }
+
+  const signedUrlByPath = new Map<string, string>();
+
+  for (const signedUrl of signedUrls || []) {
+    if (signedUrl.path && signedUrl.signedUrl) {
+      signedUrlByPath.set(signedUrl.path, signedUrl.signedUrl);
+    }
+  }
+
+  const missingPath = paths.find((path) => !signedUrlByPath.has(path));
+
+  if (missingPath) {
+    throw new Error(`Não foi possível gerar link assinado para ${missingPath}.`);
+  }
+
+  const pipefyAttachments = attachments.map((attachment) => {
+    const { path, ...attachmentPayload } = attachment;
+    const url = signedUrlByPath.get(String(path || "")) || "";
+
+    return {
+      ...attachmentPayload,
+      url,
+    };
+  });
+
+  return {
+    ...payloadWithoutToken,
+    attachments: pipefyAttachments,
+    attachmentLinks: pipefyAttachments
+      .map((attachment) => `${attachment.name}: ${attachment.url}`)
+      .join("\n"),
+  };
 }
 
 Deno.serve(async (request) => {
@@ -236,7 +328,21 @@ Deno.serve(async (request) => {
     return jsonResponse({ error: "Payload não confere com a solicitação salva." }, 400);
   }
 
-  const { uploadToken: _uploadToken, ...pipefyPayload } = payload;
+  let pipefyPayload: Awaited<ReturnType<typeof buildPipefyPayload>>;
+
+  try {
+    pipefyPayload = await buildPipefyPayload(adminClient, payload);
+  } catch (error) {
+    return jsonResponse(
+      {
+        error: error instanceof Error
+          ? error.message
+          : "Não foi possível gerar os links dos anexos.",
+      },
+      500,
+    );
+  }
+
   const response = await fetch(webhookUrl, {
     method: "POST",
     headers: {

@@ -461,6 +461,7 @@ function buildClientWebhookPayload(
       name: attachment.name,
       type: attachment.type,
       size: attachment.size,
+      path: attachment.path,
     })),
     createdAt: record.createdAt,
     uploadToken,
