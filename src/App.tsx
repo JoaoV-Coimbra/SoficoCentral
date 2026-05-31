@@ -4,6 +4,7 @@ import {
   FileArchive,
   FileText,
   Filter,
+  LoaderCircle,
   Mail,
   Pencil,
   Plus,
@@ -597,6 +598,7 @@ function App() {
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [recordsLoading, setRecordsLoading] = useState(false);
+  const [recordSaving, setRecordSaving] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
   const [profileLoading, setProfileLoading] = useState(false);
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
@@ -1045,6 +1047,10 @@ function App() {
   async function saveRecord(event) {
     event.preventDefault();
 
+    if (recordSaving) {
+      return;
+    }
+
     if (activeTab === "administrator" && !canAccessAdministrator(profile)) {
       setToast(
         "Faça login com perfil de administradora para registrar essa solicitação.",
@@ -1069,30 +1075,31 @@ function App() {
       return;
     }
 
-    const now = new Date().toISOString();
-    const isNewRecord = !form.id;
-    const uploadToken =
-      isNewRecord && form.type === "client" ? makeUploadToken() : "";
-    const uploadTokenHash = uploadToken ? await sha256Hex(uploadToken) : "";
-    const record: SolicitationRecord = {
-      ...form,
-      id: form.id || makeId(),
-      type:
-        form.type ||
-        (activeTab === "administrator" ? "administrator" : "client"),
-      protocol: form.protocol || makeProtocol(records),
-      status: form.status || "Novo",
-      email: form.email.trim(),
-      name: form.name?.trim() || "",
-      phone: form.phone?.trim() || "",
-      condominium: form.condominium?.trim() || "",
-      complement: form.complement?.trim() || "",
-      description: form.description.trim(),
-      createdAt: "createdAt" in form ? form.createdAt || now : now,
-      updatedAt: now,
-    };
+    setRecordSaving(true);
 
     try {
+      const now = new Date().toISOString();
+      const isNewRecord = !form.id;
+      const uploadToken =
+        isNewRecord && form.type === "client" ? makeUploadToken() : "";
+      const uploadTokenHash = uploadToken ? await sha256Hex(uploadToken) : "";
+      const record: SolicitationRecord = {
+        ...form,
+        id: form.id || makeId(),
+        type:
+          form.type ||
+          (activeTab === "administrator" ? "administrator" : "client"),
+        protocol: form.protocol || makeProtocol(records),
+        status: form.status || "Novo",
+        email: form.email.trim(),
+        name: form.name?.trim() || "",
+        phone: form.phone?.trim() || "",
+        condominium: form.condominium?.trim() || "",
+        complement: form.complement?.trim() || "",
+        description: form.description.trim(),
+        createdAt: "createdAt" in form ? form.createdAt || now : now,
+        updatedAt: now,
+      };
       let recordToPersist = record;
 
       if (isNewRecord) {
@@ -1167,6 +1174,8 @@ function App() {
       console.error("Erro ao salvar solicitação no Supabase:", error);
       const message = getSupabaseErrorMessage(error);
       setToast(`Não foi possível salvar no Supabase: ${message}`);
+    } finally {
+      setRecordSaving(false);
     }
   }
 
@@ -1525,8 +1534,8 @@ function App() {
                     Login da administradora
                   </h2>
                   <p className="mt-2 text-sm font-semibold text-slate-500">
-                    Entre com um usuário de administradora, operador ou admin
-                    para registrar solicitações.
+                    Entre com um usuário de administradora ou peça para o
+                    operador autorização
                   </p>
                 </div>
 
@@ -1597,12 +1606,12 @@ function App() {
                     {form.id
                       ? "Atualizar contato"
                       : activeTab === "client"
-                        ? "Cadastrar solicitação do cliente"
+                        ? "Registre sua solicitação"
                         : "Cadastrar solicitação da administradora"}
                   </h2>
                   <p className="mt-1 text-sm font-medium text-slate-500">
                     {activeTab === "client"
-                      ? "Registre a demanda do cliente e anexe documentos úteis para análise."
+                      ? "Preencha as informações abaixo para atendimento"
                       : "Registre a demanda da administradora e mantenha os comprovantes ligados ao caso."}
                   </p>
                 </div>
@@ -1869,9 +1878,27 @@ function App() {
                   >
                     Limpar
                   </button>
-                  <button className="button-primary" type="submit">
-                    <Plus size={18} />
-                    {form.id ? "Atualizar contato" : "Salvar contato"}
+                  <button
+                    className="button-primary"
+                    type="submit"
+                    disabled={recordSaving}
+                  >
+                    {recordSaving ? (
+                      <LoaderCircle
+                        className="animate-spin"
+                        size={18}
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <Plus size={18} />
+                    )}
+                    {recordSaving
+                      ? form.id
+                        ? "Atualizando..."
+                        : "Registrando..."
+                      : form.id
+                        ? "Atualizar contato"
+                        : "Registrar contato"}
                   </button>
                 </div>
               </form>
@@ -1893,8 +1920,7 @@ function App() {
                   Login do operador
                 </h2>
                 <p className="mt-2 text-sm font-semibold text-slate-500">
-                  Entre com o usuário cadastrado no Supabase para acessar as
-                  solicitações.
+                  Entre com um usuário operador
                 </p>
               </div>
 

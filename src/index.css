@@ -44,7 +44,7 @@
   }
 
   .button-primary {
-    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-fi-orange px-4 text-sm font-extrabold text-white shadow-lg shadow-orange-500/20 transition hover:bg-orange-600;
+    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-fi-orange px-4 text-sm font-extrabold text-white shadow-lg shadow-orange-500/20 transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:bg-fi-orange;
   }
 
   .button-secondary {
