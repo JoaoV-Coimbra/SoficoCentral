@@ -547,6 +547,15 @@ function canAccessOperator(profile: UserProfile | null) {
   return Boolean(profile && ["operador", "admin"].includes(profile.role));
 }
 
+function canAccessOwnAdministratorRecords(profile: UserProfile | null) {
+  const administrator = profile?.administradora || profile?.administrador || "";
+  return Boolean(profile?.role === "administradora" && administrator);
+}
+
+function canReadRecords(profile: UserProfile | null) {
+  return canAccessOperator(profile) || canAccessOwnAdministratorRecords(profile);
+}
+
 function getSupabaseErrorMessage(error: unknown) {
   if (!error) return "Erro desconhecido";
 
@@ -605,6 +614,8 @@ function App() {
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState("");
   const [search, setSearch] = useState("");
+  const [administratorSearch, setAdministratorSearch] = useState("");
+  const [administratorAreaFilter, setAdministratorAreaFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [areaFilter, setAreaFilter] = useState("");
   const [selectedRecord, setSelectedRecord] =
@@ -612,6 +623,7 @@ function App() {
   const [toast, setToast] = useState("");
   const [isDragging, setIsDragging] = useState(false);
   const [pendingOperatorTab, setPendingOperatorTab] = useState(false);
+  const [pendingAdministratorTab, setPendingAdministratorTab] = useState(false);
   const [showCreateUserModal, setShowCreateUserModal] = useState(false);
   const [createUserForm, setCreateUserForm] = useState({
     email: "",
@@ -717,16 +729,25 @@ function App() {
   }, [session]);
 
   async function refreshRecords() {
-    if (!canAccessOperator(profile)) {
+    if (!canReadRecords(profile)) {
       setRecords([]);
       return;
     }
 
     setRecordsLoading(true);
-    const { data, error } = await supabase
+    const profileAdministrator = profile?.administradora || profile?.administrador || "";
+    let query = supabase
       .from("solicitacoes")
       .select("*")
       .order("updated_at", { ascending: false });
+
+    if (profile?.role === "administradora") {
+      query = query
+        .eq("tipo", "administrator")
+        .eq("administradora", profileAdministrator);
+    }
+
+    const { data, error } = await query;
 
     if (error || !data) {
       console.error("Erro ao carregar solicitações:", error);
@@ -746,13 +767,20 @@ function App() {
   }
 
   useEffect(() => {
-    if (activeTab === "operator" && canAccessOperator(profile)) {
+    if (
+      (activeTab === "operator" && canAccessOperator(profile)) ||
+      (activeTab === "administrator" && canAccessOwnAdministratorRecords(profile))
+    ) {
       refreshRecords();
     }
   }, [activeTab, profile]);
 
   useEffect(() => {
-    if (activeTab !== "operator" || !canAccessOperator(profile)) {
+    const shouldSyncRecords =
+      (activeTab === "operator" && canAccessOperator(profile)) ||
+      (activeTab === "administrator" && canAccessOwnAdministratorRecords(profile));
+
+    if (!shouldSyncRecords) {
       return;
     }
 
@@ -790,11 +818,16 @@ function App() {
     }));
   }, [activeTab, profile]);
 
-  // Quando o login é bem-sucedido e o profile carregar com acesso, muda para operator
+  // Quando o login é bem-sucedido e o profile carregar com acesso, mantém o usuário na área correta.
   useEffect(() => {
     if (pendingOperatorTab && canAccessOperator(profile)) {
       setActiveTab("operator");
       setPendingOperatorTab(false);
+    }
+
+    if (pendingAdministratorTab && canAccessOwnAdministratorRecords(profile)) {
+      setActiveTab("administrator");
+      setPendingAdministratorTab(false);
     }
 
     if (
@@ -807,7 +840,25 @@ function App() {
       setLoginError("Login feito, mas este usuário não tem perfil/role em public.profiles.");
       setPendingOperatorTab(false);
     }
-  }, [pendingOperatorTab, profile, session, authLoading, profileLoading]);
+
+    if (
+      pendingAdministratorTab &&
+      session &&
+      profile === null &&
+      !authLoading &&
+      !profileLoading
+    ) {
+      setLoginError("Login feito, mas este usuário não tem perfil/role de administradora em public.profiles.");
+      setPendingAdministratorTab(false);
+    }
+  }, [
+    pendingAdministratorTab,
+    pendingOperatorTab,
+    profile,
+    session,
+    authLoading,
+    profileLoading,
+  ]);
 
   // Filtros do operador ficam memoizados para evitar recálculo desnecessário ao digitar.
   const filteredRecords = useMemo(() => {
@@ -889,6 +940,74 @@ function App() {
     };
   }, [filteredRecords]);
 
+  const currentProfileAdministrator =
+    profile?.administradora || profile?.administrador || "";
+
+  const administratorRecords = useMemo(() => {
+    const normalizedSearch = administratorSearch.trim().toLowerCase();
+
+    return records
+      .filter((record) => {
+        const isOwnAdministratorRecord =
+          record.type === "administrator" &&
+          record.administrator === currentProfileAdministrator;
+        const searchText = [
+          record.protocol,
+          record.administrator,
+          record.email,
+          record.area,
+          record.reason,
+          record.status,
+          record.description,
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        return (
+          isOwnAdministratorRecord &&
+          (!normalizedSearch || searchText.includes(normalizedSearch)) &&
+          (!administratorAreaFilter || record.area === administratorAreaFilter)
+        );
+      })
+      .sort(
+        (a, b) =>
+          new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+      );
+  }, [
+    administratorAreaFilter,
+    administratorSearch,
+    currentProfileAdministrator,
+    records,
+  ]);
+
+  const administratorStats = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+
+    return {
+      total: administratorRecords.length,
+      pending: administratorRecords.filter((record) =>
+        ["Novo", "Em análise", "Pendente"].includes(record.status),
+      ).length,
+      concluded: administratorRecords.filter(
+        (record) => record.status === "Concluído",
+      ).length,
+      today: administratorRecords.filter(
+        (record) => record.createdAt.slice(0, 10) === today,
+      ).length,
+    };
+  }, [administratorRecords]);
+
+  const isClientRequiredFieldsComplete = Boolean(
+    form.name.trim() &&
+      (form.email.trim() || form.phone.trim()) &&
+      form.condominium.trim() &&
+      form.complement.trim() &&
+      form.reason &&
+      form.description.trim(),
+  );
+  const areAttachmentsLocked =
+    activeTab === "client" && !isClientRequiredFieldsComplete;
+
   if (bootError) {
     return (
       <div className="grid min-h-screen place-items-center bg-fi-paper p-6">
@@ -948,13 +1067,17 @@ function App() {
     }
 
     setLoginForm({ email: "", password: "" });
-    setPendingOperatorTab(true);
+    if (activeTab === "administrator") {
+      setPendingAdministratorTab(true);
+    } else {
+      setPendingOperatorTab(true);
+    }
     setToast("Login realizado. Verificando permissões...");
   }
 
   async function signOutOperator() {
     await supabase.auth.signOut();
-    setToast("Sessão do operador encerrada.");
+    setToast("Sessão encerrada.");
   }
 
   async function createNewUser(event) {
@@ -1138,7 +1261,7 @@ function App() {
         if (error) throw error;
       }
 
-      if (canAccessOperator(profile)) {
+      if (canReadRecords(profile)) {
         setRecords((current) => {
           const exists = current.some((item) => item.id === recordToPersist.id);
           return exists
@@ -1507,6 +1630,16 @@ function App() {
                     Login necessário
                   </span>
                 ))}
+              {activeTab === "administrator" &&
+                canAccessAdministrator(profile) && (
+                  <button
+                    className="button-secondary w-full md:w-auto"
+                    type="button"
+                    onClick={signOutOperator}
+                  >
+                    Sair
+                  </button>
+                )}
             </div>
           </div>
         </header>
@@ -1632,7 +1765,9 @@ function App() {
                   {activeTab === "client" ? (
                     <>
                       <label className="field-label">
-                        Nome
+                        <span>
+                          Nome <RequiredHint />
+                        </span>
                         <input
                           className="field-control"
                           name="name"
@@ -1645,7 +1780,9 @@ function App() {
                       </label>
 
                       <label className="field-label">
-                        E-mail
+                        <span>
+                          E-mail <RequiredHint label="Informe e-mail ou telefone." />
+                        </span>
                         <span className="relative">
                           <Mail
                             className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35"
@@ -1663,7 +1800,10 @@ function App() {
                       </label>
 
                       <label className="field-label">
-                        Telefone ou Whatsapp
+                        <span>
+                          Telefone ou Whatsapp{" "}
+                          <RequiredHint label="Informe e-mail ou telefone." />
+                        </span>
                         <input
                           className="field-control"
                           name="phone"
@@ -1677,7 +1817,9 @@ function App() {
                       </label>
 
                       <label className="field-label">
-                        Condomínio
+                        <span>
+                          Condomínio <RequiredHint />
+                        </span>
                         <input
                           className="field-control"
                           name="condominium"
@@ -1690,7 +1832,9 @@ function App() {
                       </label>
 
                       <label className="field-label">
-                        Complemento
+                        <span>
+                          Complemento <RequiredHint />
+                        </span>
                         <input
                           className="field-control"
                           name="complement"
@@ -1703,7 +1847,9 @@ function App() {
                       </label>
 
                       <label className="field-label">
-                        Motivo do contato
+                        <span>
+                          Motivo do contato <RequiredHint />
+                        </span>
                         <select
                           className="field-control"
                           name="reason"
@@ -1792,7 +1938,10 @@ function App() {
                 </div>
 
                 <label className="field-label">
-                  Descrição do caso
+                  <span>
+                    Descrição do caso{" "}
+                    {activeTab === "client" && <RequiredHint />}
+                  </span>
                   <textarea
                     className="field-area"
                     name="description"
@@ -1805,18 +1954,33 @@ function App() {
 
                 <label
                   className={`grid min-h-40 place-items-center gap-2 rounded-lg border-2 border-dashed p-5 text-center transition ${
-                    isDragging
-                      ? "border-fi-orange bg-fi-orangeSoft"
-                      : "border-violet-200 bg-gradient-to-br from-violet-50 to-white"
+                    areAttachmentsLocked
+                      ? "cursor-not-allowed border-slate-200 bg-slate-50 opacity-75"
+                      : isDragging
+                        ? "border-fi-orange bg-fi-orangeSoft"
+                        : "border-violet-200 bg-gradient-to-br from-violet-50 to-white"
                   }`}
+                  aria-disabled={areAttachmentsLocked}
+                  onClick={(event) => {
+                    if (!areAttachmentsLocked) return;
+                    event.preventDefault();
+                    setToast("Preencha os campos obrigatórios antes de anexar arquivos.");
+                  }}
                   onDragLeave={() => setIsDragging(false)}
                   onDragOver={(event) => {
+                    if (areAttachmentsLocked) {
+                      return;
+                    }
                     event.preventDefault();
                     setIsDragging(true);
                   }}
                   onDrop={(event) => {
                     event.preventDefault();
                     setIsDragging(false);
+                    if (areAttachmentsLocked) {
+                      setToast("Preencha os campos obrigatórios antes de anexar arquivos.");
+                      return;
+                    }
                     addFiles(event.dataTransfer.files);
                   }}
                 >
@@ -1826,6 +1990,7 @@ function App() {
                     type="file"
                     accept=".pdf,.png,.jpg,.jpeg,.doc,.docx,.xls,.xlsx"
                     multiple
+                    disabled={areAttachmentsLocked}
                     onChange={(event) => addFiles(event.target.files)}
                   />
                   <span className="inline-flex h-11 w-11 items-center justify-center rounded-lg bg-fi-navy text-white">
@@ -1835,9 +2000,9 @@ function App() {
                     Anexe comprovantes e arquivos úteis
                   </strong>
                   <small className="max-w-md text-sm font-medium text-slate-500">
-                    Arraste arquivos para cá ou clique para selecionar
-                    PDFs, imagens, Word e Excel. Limite de 5 arquivos, 10 MB
-                    cada.
+                    {areAttachmentsLocked
+                      ? "Preencha os campos obrigatórios para liberar o envio de anexos."
+                      : "Arraste arquivos para cá ou clique para selecionar PDFs, imagens, Word e Excel. Limite de 5 arquivos, 10 MB cada."}
                   </small>
                 </label>
 
@@ -1904,6 +2069,172 @@ function App() {
               </form>
             </section>
           )}
+
+          {activeTab === "administrator" &&
+            canAccessOwnAdministratorRecords(profile) && (
+              <section
+                id="administrator-records"
+                className="min-w-0 rounded-lg border border-violet-100 bg-white p-5 shadow-glow md:p-6"
+              >
+                <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+                  <div>
+                    <h2 className="text-xl font-black text-fi-navy">
+                      Minhas solicitações
+                    </h2>
+                    <p className="mt-1 text-sm font-medium text-slate-500">
+                      Acompanhe os contatos registrados por {currentProfileAdministrator}.
+                    </p>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-[minmax(220px,1fr)_minmax(150px,190px)] xl:w-full xl:max-w-[560px]">
+                    <label className="relative">
+                      <span className="sr-only">Buscar solicitações</span>
+                      <Search
+                        className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35"
+                        size={18}
+                      />
+                      <input
+                        className="field-control pl-10"
+                        type="search"
+                        placeholder="Buscar por protocolo, e-mail ou motivo"
+                        value={administratorSearch}
+                        onChange={(event) =>
+                          setAdministratorSearch(event.target.value)
+                        }
+                      />
+                    </label>
+                    <label className="relative">
+                      <span className="sr-only">Filtrar por área</span>
+                      <Filter
+                        className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35"
+                        size={18}
+                      />
+                      <select
+                        className="field-control pl-10"
+                        value={administratorAreaFilter}
+                        onChange={(event) =>
+                          setAdministratorAreaFilter(event.target.value)
+                        }
+                      >
+                        <option value="">Todas as áreas</option>
+                        {areas.map((area) => (
+                          <option key={area}>{area}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                </div>
+
+                <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <SummaryCard
+                    label="Total"
+                    value={administratorStats.total}
+                  />
+                  <SummaryCard
+                    label="Em aberto"
+                    value={administratorStats.pending}
+                    accent="orange"
+                  />
+                  <SummaryCard
+                    label="Concluídas"
+                    value={administratorStats.concluded}
+                  />
+                  <SummaryCard
+                    label="Hoje"
+                    value={administratorStats.today}
+                    accent="orange"
+                  />
+                </div>
+
+                <div className="rounded-lg border border-violet-100 bg-violet-50/50 p-3">
+                  {recordsLoading && (
+                    <div className="mb-3 rounded-lg border border-violet-100 bg-white px-4 py-3 text-sm font-extrabold text-fi-navy">
+                      Carregando solicitações...
+                    </div>
+                  )}
+
+                  <div className="grid gap-3">
+                    {administratorRecords.map((record) => (
+                      <article
+                        className="rounded-lg border border-violet-100 bg-white p-4 transition hover:border-fi-orange/35"
+                        key={record.id}
+                      >
+                        <div className="grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-[130px_minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1fr)_130px_140px] xl:items-center">
+                          <RecordCell label="Protocolo">
+                            <span className="chip max-w-full bg-fi-orangeSoft text-fi-orange">
+                              <span className="whitespace-normal break-all leading-tight">
+                                {record.protocol}
+                              </span>
+                            </span>
+                          </RecordCell>
+
+                          <RecordCell label="Solicitante">
+                            <strong className="block truncate text-sm font-black text-fi-navy">
+                              {record.administrator}
+                            </strong>
+                            <span className="block truncate text-xs font-semibold text-slate-400">
+                              {formatDate(record.createdAt)}
+                            </span>
+                          </RecordCell>
+
+                          <RecordCell label="E-mail">
+                            <span className="block truncate text-sm font-semibold text-slate-600">
+                              {record.email}
+                            </span>
+                          </RecordCell>
+
+                          <RecordCell label="Motivo">
+                            <span className="block truncate text-sm font-semibold text-slate-600">
+                              {record.reason}
+                            </span>
+                            <span className="mt-1 inline-flex max-w-full text-xs font-bold text-fi-navy/55">
+                              <span className="truncate">
+                                {record.area || "Sem área"}
+                              </span>
+                            </span>
+                          </RecordCell>
+
+                          <RecordCell label="Status">
+                            <span className="chip max-w-full bg-violet-100 text-fi-navy">
+                              <span className="truncate">{record.status}</span>
+                            </span>
+                          </RecordCell>
+
+                          <div className="grid min-w-0 gap-2 sm:grid-cols-[auto_1fr] sm:items-center xl:grid-cols-[auto_auto] xl:justify-end">
+                            <span className="chip max-w-max bg-fi-orangeSoft text-fi-orange">
+                              {record.attachments.length} anexos
+                            </span>
+                            <div className="flex flex-wrap gap-2 sm:justify-end">
+                              <button
+                                className="icon-button"
+                                type="button"
+                                title="Ver"
+                                onClick={() => setSelectedRecord(record)}
+                              >
+                                <Eye size={16} />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+
+                  {administratorRecords.length === 0 && (
+                    <div className="grid min-h-52 place-items-center gap-2 px-6 py-12 text-center">
+                      <div className="inline-flex h-12 w-12 items-center justify-center rounded-lg bg-fi-orangeSoft text-fi-orange">
+                        <FileText size={24} />
+                      </div>
+                      <strong className="text-fi-navy">
+                        Nenhuma solicitação encontrada
+                      </strong>
+                      <span className="max-w-sm text-sm font-medium text-slate-500">
+                        Registre um contato ou ajuste a busca e o filtro de área.
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </section>
+            )}
 
           {activeTab === "operator" && !canAccessOperator(profile) && (
             <section className="mx-auto w-full max-w-xl rounded-lg border border-violet-100 bg-white p-6 shadow-glow">
@@ -2225,22 +2556,26 @@ function App() {
             <div className="grid gap-3 md:grid-cols-2">
               <Detail label="Protocolo" value={selectedRecord.protocol} />
               <Detail label="Tipo" value={recordTypes[selectedRecord.type]} />
-              <div className="rounded-lg border border-violet-100 bg-violet-50/65 p-4">
-                <span className="text-xs font-black uppercase text-fi-navy/55">
-                  Status
-                </span>
-                <select
-                  className="field-control mt-2"
-                  value={selectedRecord.status}
-                  onChange={(event) =>
-                    updateStatus(selectedRecord.id, event.target.value)
-                  }
-                >
-                  {statuses.map((status) => (
-                    <option key={status}>{status}</option>
-                  ))}
-                </select>
-              </div>
+              {canAccessOperator(profile) ? (
+                <div className="rounded-lg border border-violet-100 bg-violet-50/65 p-4">
+                  <span className="text-xs font-black uppercase text-fi-navy/55">
+                    Status
+                  </span>
+                  <select
+                    className="field-control mt-2"
+                    value={selectedRecord.status}
+                    onChange={(event) =>
+                      updateStatus(selectedRecord.id, event.target.value)
+                    }
+                  >
+                    {statuses.map((status) => (
+                      <option key={status}>{status}</option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <Detail label="Status" value={selectedRecord.status} />
+              )}
               {selectedRecord.type === "client" ? (
                 <>
                   <Detail label="Nome" value={selectedRecord.name} />
@@ -2311,14 +2646,16 @@ function App() {
             </div>
 
             <footer className="mt-5 flex flex-col gap-3 sm:flex-row sm:justify-end">
-              <button
-                className="button-secondary"
-                type="button"
-                onClick={() => editRecord(selectedRecord)}
-              >
-                <Pencil size={18} />
-                Editar
-              </button>
+              {canAccessOperator(profile) && (
+                <button
+                  className="button-secondary"
+                  type="button"
+                  onClick={() => editRecord(selectedRecord)}
+                >
+                  <Pencil size={18} />
+                  Editar
+                </button>
+              )}
               <button
                 className="button-primary"
                 type="button"
@@ -2462,6 +2799,22 @@ type RecordCellProps = {
   label: string;
   children: React.ReactNode;
 };
+
+type RequiredHintProps = {
+  label?: string;
+};
+
+function RequiredHint({ label = "Campo obrigatório" }: RequiredHintProps) {
+  return (
+    <span
+      className="align-super text-xs font-black text-fi-orange"
+      title={label}
+      aria-label={label}
+    >
+      *
+    </span>
+  );
+}
 
 // Célula reutilizada nos cards do operador para manter alinhamento e truncamento consistentes.
 function RecordCell({ label, children }: RecordCellProps) {
