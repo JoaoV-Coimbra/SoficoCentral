@@ -108,6 +108,13 @@ type DbSolicitationRow = {
   updated_at: string;
 };
 
+type PublicProtocolStatus = {
+  protocolo: string;
+  status: Status;
+  created_at: string;
+  updated_at: string;
+};
+
 const initialForm: SolicitationForm = {
   id: "",
   protocol: "",
@@ -279,6 +286,30 @@ function formatPhone(value: string) {
   }
 
   return `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7)}`;
+}
+
+function isValidEmail(value: string) {
+  const email = value.trim().toLowerCase();
+
+  return (
+    email.length <= 254 &&
+    /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(email) &&
+    !email.includes("..")
+  );
+}
+
+function isValidBrazilianPhone(value: string) {
+  const digits = value.replace(/\D/g, "");
+
+  if (!/^[1-9]\d{9,10}$/.test(digits) || /^(\d)\1+$/.test(digits)) {
+    return false;
+  }
+
+  const subscriberNumber = digits.slice(2);
+
+  return digits.length === 10
+    ? /^[2-5]\d{7}$/.test(subscriberNumber)
+    : /^9\d{8}$/.test(subscriberNumber);
 }
 
 function sanitizeFileName(name: string) {
@@ -616,6 +647,11 @@ function App() {
   const [search, setSearch] = useState("");
   const [administratorSearch, setAdministratorSearch] = useState("");
   const [administratorAreaFilter, setAdministratorAreaFilter] = useState("");
+  const [protocolLookup, setProtocolLookup] = useState("");
+  const [protocolLookupResult, setProtocolLookupResult] =
+    useState<PublicProtocolStatus | null>(null);
+  const [protocolLookupError, setProtocolLookupError] = useState("");
+  const [protocolLookupLoading, setProtocolLookupLoading] = useState(false);
   const [typeFilter, setTypeFilter] = useState("");
   const [areaFilter, setAreaFilter] = useState("");
   const [selectedRecord, setSelectedRecord] =
@@ -999,7 +1035,9 @@ function App() {
 
   const isClientRequiredFieldsComplete = Boolean(
     form.name.trim() &&
-      (form.email.trim() || form.phone.trim()) &&
+      ((!form.email.trim() || isValidEmail(form.email)) &&
+        (!form.phone.trim() || isValidBrazilianPhone(form.phone)) &&
+        (form.email.trim() || form.phone.trim())) &&
       form.condominium.trim() &&
       form.complement.trim() &&
       form.reason &&
@@ -1046,6 +1084,41 @@ function App() {
   function updateLoginField(event) {
     const { name, value } = event.target;
     setLoginForm((current) => ({ ...current, [name]: value }));
+  }
+
+  async function lookupProtocolStatus(event) {
+    event.preventDefault();
+
+    const protocol = protocolLookup.trim().toUpperCase();
+    setProtocolLookup(protocol);
+    setProtocolLookupResult(null);
+    setProtocolLookupError("");
+
+    if (!/^SOF-\d{4}-[A-Z0-9-]+$/.test(protocol)) {
+      setProtocolLookupError("Informe um protocolo válido, como SOF-2026-12345.");
+      return;
+    }
+
+    setProtocolLookupLoading(true);
+    const { data, error } = await supabase.rpc("consultar_status_protocolo", {
+      p_protocolo: protocol,
+    });
+    setProtocolLookupLoading(false);
+
+    if (error) {
+      console.error("Erro ao consultar protocolo:", error);
+      setProtocolLookupError("Não foi possível consultar o protocolo agora.");
+      return;
+    }
+
+    const result = Array.isArray(data) ? data[0] : data;
+
+    if (!result) {
+      setProtocolLookupError("Protocolo não encontrado. Confira o número informado.");
+      return;
+    }
+
+    setProtocolLookupResult(result as PublicProtocolStatus);
   }
 
   async function signInOperator(event) {
@@ -1189,6 +1262,18 @@ function App() {
         setToast("Informe pelo menos E-mail ou Telefone/Whatsapp.");
         return;
       }
+
+      if (hasEmail && !isValidEmail(form.email)) {
+        setToast("Informe um e-mail válido, como nome@empresa.com.br.");
+        return;
+      }
+
+      if (hasPhone && !isValidBrazilianPhone(form.phone)) {
+        setToast(
+          "Informe um telefone válido com DDD, como (21) 99999-9999.",
+        );
+        return;
+      }
     }
 
     const attachmentValidationError = validateAttachments(form.attachments);
@@ -1214,7 +1299,7 @@ function App() {
           (activeTab === "administrator" ? "administrator" : "client"),
         protocol: form.protocol || makeProtocol(records),
         status: form.status || "Novo",
-        email: form.email.trim(),
+        email: form.email.trim().toLowerCase(),
         name: form.name?.trim() || "",
         phone: form.phone?.trim() || "",
         condominium: form.condominium?.trim() || "",
@@ -1522,6 +1607,72 @@ function App() {
             <Metric label="Administradoras" value={stats.administrators} />
           </div>
         )}
+
+        {activeTab === "client" && (
+          <form
+            className="mt-auto grid gap-3 border-t border-white/10 px-4 py-5"
+            onSubmit={lookupProtocolStatus}
+          >
+            <div>
+              <p className="text-sm font-black text-white">
+                Acompanhe seu chamado
+              </p>
+              <p className="mt-1 text-xs font-semibold leading-relaxed text-white/55">
+                Consulte a situação usando o número do protocolo.
+              </p>
+            </div>
+            <label className="relative">
+              <span className="sr-only">Número do protocolo</span>
+              <Search
+                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/40"
+                size={17}
+              />
+              <input
+                className="min-h-11 w-full rounded-lg border border-white/15 bg-white pl-10 pr-3 text-sm font-bold uppercase text-fi-navy outline-none transition placeholder:normal-case placeholder:font-medium placeholder:text-slate-400 focus:border-fi-orange focus:ring-4 focus:ring-fi-orange/20"
+                type="search"
+                placeholder="Ex.: SOF-2026-12345"
+                value={protocolLookup}
+                onChange={(event) => {
+                  setProtocolLookup(event.target.value);
+                  setProtocolLookupResult(null);
+                  setProtocolLookupError("");
+                }}
+              />
+            </label>
+            <button
+              className="button-primary w-full"
+              type="submit"
+              disabled={protocolLookupLoading}
+            >
+              {protocolLookupLoading ? (
+                <LoaderCircle className="animate-spin" size={17} />
+              ) : (
+                <Search size={17} />
+              )}
+              {protocolLookupLoading ? "Consultando..." : "Consultar protocolo"}
+            </button>
+
+            {protocolLookupError && (
+              <p className="rounded-lg border border-red-300/25 bg-red-400/10 px-3 py-2 text-xs font-bold leading-relaxed text-red-100">
+                {protocolLookupError}
+              </p>
+            )}
+
+            {protocolLookupResult && (
+              <div className="rounded-lg border border-white/15 bg-white/10 p-3">
+                <span className="block text-[0.65rem] font-black uppercase tracking-wide text-white/50">
+                  Situação atual
+                </span>
+                <strong className="mt-1 block text-lg font-black text-white">
+                  {protocolLookupResult.status}
+                </strong>
+                <span className="mt-2 block text-xs font-semibold text-white/60">
+                  Atualizado em {formatDate(protocolLookupResult.updated_at)}
+                </span>
+              </div>
+            )}
+          </form>
+        )}
       </aside>
 
       <main className="lg:pl-72">
@@ -1792,9 +1943,20 @@ function App() {
                             className="field-control pl-10"
                             name="email"
                             type="email"
+                            inputMode="email"
+                            autoComplete="email"
+                            maxLength={254}
                             placeholder="nome@email.com"
                             value={form.email}
                             onChange={updateField}
+                            onInvalid={(event) =>
+                              event.currentTarget.setCustomValidity(
+                                "Informe um e-mail válido, como nome@empresa.com.br.",
+                              )
+                            }
+                            onInput={(event) =>
+                              event.currentTarget.setCustomValidity("")
+                            }
                           />
                         </span>
                       </label>
@@ -1808,11 +1970,22 @@ function App() {
                           className="field-control"
                           name="phone"
                           type="tel"
-                          inputMode="tel"
+                          inputMode="numeric"
+                          autoComplete="tel"
                           maxLength={15}
+                          pattern="\([1-9][0-9]\) ([2-5][0-9]{3}|9[0-9]{4})-[0-9]{4}"
+                          title="Use um telefone com DDD, como (21) 99999-9999."
                           placeholder="(21) 99999-9999"
                           value={form.phone}
                           onChange={updateField}
+                          onInvalid={(event) =>
+                            event.currentTarget.setCustomValidity(
+                              "Informe um telefone válido com DDD, como (21) 99999-9999.",
+                            )
+                          }
+                          onInput={(event) =>
+                            event.currentTarget.setCustomValidity("")
+                          }
                         />
                       </label>
 

@@ -5,6 +5,9 @@ type Status = "Novo" | "Em análise" | "Pendente" | "Concluído" | "Cancelado";
 type PipefyStatusPayload = {
   protocol?: string;
   protocolo?: string;
+  cardId?: string | number;
+  card_id?: string | number;
+  pipefyCardId?: string | number;
   status?: string;
   phase?: string | { name?: string };
   phaseName?: string;
@@ -102,6 +105,16 @@ function getPhaseName(payload: PipefyStatusPayload) {
   )?.trim();
 }
 
+function getCardId(payload: PipefyStatusPayload) {
+  const cardId =
+    payload.card?.id ||
+    payload.cardId ||
+    payload.card_id ||
+    payload.pipefyCardId;
+
+  return cardId ? String(cardId) : null;
+}
+
 async function logEvent(
   adminClient: ReturnType<typeof createClient>,
   payload: PipefyStatusPayload,
@@ -191,11 +204,16 @@ Deno.serve(async (request) => {
   }
 
   const updatedAt = new Date().toISOString();
+  const pipefyCardId = getCardId(payload);
   const { data, error } = await adminClient
     .from("solicitacoes")
-    .update({ status, updated_at: updatedAt })
+    .update({
+      status,
+      updated_at: updatedAt,
+      ...(pipefyCardId ? { pipefy_card_id: pipefyCardId } : {}),
+    })
     .eq("protocolo", protocol)
-    .select("id, protocolo, status, updated_at")
+    .select("id, protocolo, status, updated_at, pipefy_card_id")
     .maybeSingle();
 
   if (error) {
