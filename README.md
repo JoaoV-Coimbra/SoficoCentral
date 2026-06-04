@@ -38,6 +38,21 @@ npm run build
 npm run preview
 ```
 
+## Páginas
+
+A aplicação possui URLs próprias para cada área:
+
+- `/cliente`
+- `/administradora`
+- `/operador`
+
+O React mantém a navegação sem recarregar a aplicação e converte
+automaticamente links antigos baseados em `#` para as URLs limpas.
+
+Como esta é uma SPA, a hospedagem escolhida deve encaminhar acessos diretos
+dessas rotas para o `index.html`. Essa regra é independente do provedor e
+normalmente é chamada de SPA fallback ou history fallback.
+
 ## Supabase
 
 As migrations ficam em `supabase/migrations`.
@@ -75,8 +90,8 @@ automação de atualização de status do Pipefy, envie também:
 
 O webhook aceita o ID como `card.id`, `cardId`, `card_id` ou `pipefyCardId`.
 Como fallback, o webhook de exclusão reconhece o protocolo quando ele aparece
-no título do card ou localiza uma única solicitação cujo nome do solicitante
-seja exatamente igual ao título.
+no título do card. A exclusão nunca usa apenas o nome/título para localizar uma
+solicitação.
 
 ## Assinatura
 

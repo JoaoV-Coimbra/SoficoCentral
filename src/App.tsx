@@ -45,6 +45,28 @@ const ALLOWED_ATTACHMENT_MIME_TYPES = [
 // Tipos centrais do fluxo: cliente, administradora, operador e registros compartilhados.
 type RecordType = "client" | "administrator";
 type ActiveTab = "client" | "administrator" | "operator";
+
+const tabPaths: Record<ActiveTab, string> = {
+  client: "/cliente",
+  administrator: "/administradora",
+  operator: "/operador",
+};
+
+function getTabFromPath(pathname: string): ActiveTab | null {
+  const normalizedPath =
+    pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
+
+  return (
+    (Object.entries(tabPaths).find(
+      ([, path]) => path === normalizedPath,
+    )?.[0] as ActiveTab | undefined) || null
+  );
+}
+
+function getLegacyTabFromHash(hash: string): ActiveTab | null {
+  return getTabFromPath(hash.replace(/^#/, ""));
+}
+
 type Status = "Novo" | "Em análise" | "Pendente" | "Concluído" | "Cancelado";
 
 type Attachment = {
@@ -632,9 +654,18 @@ function App() {
   const [records, setRecords] = useState<SolicitationRecord[]>([]);
   const [form, setForm] = useState<SolicitationForm>({
     ...initialForm,
-    type: "client",
+    type:
+      (getTabFromPath(window.location.pathname) ||
+        getLegacyTabFromHash(window.location.hash)) === "administrator"
+        ? "administrator"
+        : "client",
   });
-  const [activeTab, setActiveTab] = useState<ActiveTab>("client");
+  const [activeTab, setActiveTab] = useState<ActiveTab>(
+    () =>
+      getTabFromPath(window.location.pathname) ||
+      getLegacyTabFromHash(window.location.hash) ||
+      "client",
+  );
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [recordsLoading, setRecordsLoading] = useState(false);
@@ -670,6 +701,64 @@ function App() {
   const [createUserLoading, setCreateUserLoading] = useState(false);
   const fileInputRef = useRef(null);
 
+  function navigateToTab(tab: ActiveTab, replace = false) {
+    setActiveTab(tab);
+
+    if (tab !== "operator") {
+      setForm((current) =>
+        current.id
+          ? current
+          : {
+              ...initialForm,
+              type: tab === "administrator" ? "administrator" : "client",
+            },
+      );
+    }
+
+    if (
+      window.location.pathname === tabPaths[tab] &&
+      !window.location.hash
+    ) {
+      return;
+    }
+
+    window.history[replace ? "replaceState" : "pushState"](
+      {},
+      "",
+      `${tabPaths[tab]}${window.location.search}`,
+    );
+  }
+
+  // Mantém URLs limpas e migra automaticamente links antigos baseados em hash.
+  useEffect(() => {
+    const routeTab =
+      getLegacyTabFromHash(window.location.hash) ||
+      getTabFromPath(window.location.pathname);
+
+    if (!routeTab) {
+      navigateToTab("client", true);
+    } else if (
+      window.location.pathname !== tabPaths[routeTab] ||
+      window.location.hash
+    ) {
+      navigateToTab(routeTab, true);
+    }
+
+    const syncTabWithHistory = () => {
+      const nextTab = getTabFromPath(window.location.pathname);
+
+      if (!nextTab) {
+        navigateToTab("client", true);
+        return;
+      }
+
+      navigateToTab(nextTab, true);
+    };
+
+    window.addEventListener("popstate", syncTabWithHistory);
+    return () => window.removeEventListener("popstate", syncTabWithHistory);
+  }, []);
+
   // Toast simples para feedback curto depois de salvar, entrar, sair ou mudar status.
   useEffect(() => {
     if (!toast) return undefined;
@@ -696,7 +785,7 @@ function App() {
       setAuthLoading(false);
 
       if (event === "SIGNED_OUT") {
-        setActiveTab("client");
+        navigateToTab("client", true);
         setSelectedRecord(null);
         setProfile(null);
         setProfileLoading(false);
@@ -857,12 +946,12 @@ function App() {
   // Quando o login é bem-sucedido e o profile carregar com acesso, mantém o usuário na área correta.
   useEffect(() => {
     if (pendingOperatorTab && canAccessOperator(profile)) {
-      setActiveTab("operator");
+      navigateToTab("operator", true);
       setPendingOperatorTab(false);
     }
 
     if (pendingAdministratorTab && canAccessOwnAdministratorRecords(profile)) {
-      setActiveTab("administrator");
+      navigateToTab("administrator", true);
       setPendingAdministratorTab(false);
     }
 
@@ -1311,16 +1400,40 @@ function App() {
       let recordToPersist = record;
 
       if (isNewRecord) {
-        const dbRecord: Record<string, unknown> =
-          mapSolicitationToDb(recordToPersist);
-        const { error } = await supabase
-          .from("solicitacoes")
-          .insert(
-            uploadTokenHash
-              ? { ...dbRecord, upload_token_hash: uploadTokenHash }
-              : dbRecord,
+        if (recordToPersist.type === "client") {
+          const { data, error } = await supabase.rpc(
+            "criar_solicitacao_cliente",
+            {
+              p_nome: recordToPersist.name,
+              p_email: recordToPersist.email || null,
+              p_telefone: recordToPersist.phone || null,
+              p_condominio: recordToPersist.condominium,
+              p_complemento: recordToPersist.complement,
+              p_motivo: recordToPersist.reason,
+              p_descricao: recordToPersist.description,
+              p_upload_token_hash: uploadTokenHash,
+            },
           );
-        if (error) throw error;
+          if (error) throw error;
+
+          const persisted = Array.isArray(data) ? data[0] : data;
+          if (!persisted) {
+            throw new Error("O banco não retornou a solicitação criada.");
+          }
+
+          recordToPersist = {
+            ...recordToPersist,
+            id: persisted.id,
+            protocol: persisted.protocolo,
+            createdAt: persisted.created_at,
+            updatedAt: persisted.updated_at,
+          };
+        } else {
+          const { error } = await supabase
+            .from("solicitacoes")
+            .insert(mapSolicitationToDb(recordToPersist));
+          if (error) throw error;
+        }
 
         try {
           const attachments = await uploadRecordAttachments(
@@ -1418,7 +1531,7 @@ function App() {
   function editRecord(record) {
     setForm(record);
     setSelectedRecord(null);
-    setActiveTab(record.type === "client" ? "client" : "administrator");
+    navigateToTab(record.type === "client" ? "client" : "administrator");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -1546,12 +1659,7 @@ function App() {
                 : "text-white/75 hover:bg-white/10 hover:text-white"
             }`}
             type="button"
-            onClick={() => {
-              setActiveTab("client");
-              setForm((current) =>
-                current.id ? current : { ...initialForm, type: "client" },
-              );
-            }}
+            onClick={() => navigateToTab("client")}
           >
             <Plus size={18} />
             Área do Cliente
@@ -1563,14 +1671,7 @@ function App() {
                 : "text-white/75 hover:bg-white/10 hover:text-white"
             }`}
             type="button"
-            onClick={() => {
-              setActiveTab("administrator");
-              setForm((current) =>
-                current.id
-                  ? current
-                  : { ...initialForm, type: "administrator" },
-              );
-            }}
+            onClick={() => navigateToTab("administrator")}
           >
             <FileText size={18} />
             Área da Administradora
@@ -1582,7 +1683,7 @@ function App() {
                 : "text-white/75 hover:bg-white/10 hover:text-white"
             }`}
             type="button"
-            onClick={() => setActiveTab("operator")}
+            onClick={() => navigateToTab("operator")}
           >
             <FileText size={18} />
             Área do Operador
@@ -1710,12 +1811,7 @@ function App() {
                       : "text-fi-navy hover:bg-violet-50"
                   }`}
                   type="button"
-                  onClick={() => {
-                    setActiveTab("client");
-                    setForm((current) =>
-                      current.id ? current : { ...initialForm, type: "client" },
-                    );
-                  }}
+                  onClick={() => navigateToTab("client")}
                 >
                   Cliente
                 </button>
@@ -1726,14 +1822,7 @@ function App() {
                       : "text-fi-navy hover:bg-violet-50"
                   }`}
                   type="button"
-                  onClick={() => {
-                    setActiveTab("administrator");
-                    setForm((current) =>
-                      current.id
-                        ? current
-                        : { ...initialForm, type: "administrator" },
-                    );
-                  }}
+                  onClick={() => navigateToTab("administrator")}
                 >
                   Administradora
                 </button>
@@ -1744,7 +1833,7 @@ function App() {
                       : "text-fi-navy hover:bg-violet-50"
                   }`}
                   type="button"
-                  onClick={() => setActiveTab("operator")}
+                  onClick={() => navigateToTab("operator")}
                 >
                   Operador
                 </button>

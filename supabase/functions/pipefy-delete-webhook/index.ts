@@ -184,31 +184,6 @@ Deno.serve(async (request) => {
     findError = result.error;
   }
 
-  if (!record && !findError && card.title?.trim()) {
-    const result = await adminClient
-      .from("solicitacoes")
-      .select("id, protocolo, pipefy_card_id")
-      .ilike("nome", card.title.trim())
-      .limit(2);
-
-    findError = result.error;
-
-    if (result.data?.length === 1) {
-      record = result.data[0];
-    }
-
-    if (result.data && result.data.length > 1) {
-      await logEvent(adminClient, payload, 409, "delete_ambiguous_card_title");
-      return jsonResponse(
-        {
-          error:
-            "Mais de uma solicitação possui o mesmo título do card. Vincule o cardId antes da exclusão.",
-        },
-        409,
-      );
-    }
-  }
-
   if (findError) {
     await logEvent(adminClient, payload, 500, `delete_lookup_error: ${findError.message}`);
     return jsonResponse({ error: findError.message }, 500);
@@ -219,7 +194,8 @@ Deno.serve(async (request) => {
     return jsonResponse({
       ok: true,
       deleted: false,
-      message: "Solicitação já estava ausente ou ainda não possui vínculo com o card.",
+      message:
+        "Solicitação já estava ausente ou o card ainda não possui vínculo seguro.",
     });
   }
 
