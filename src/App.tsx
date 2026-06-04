@@ -1,4 +1,7 @@
 import {
+  AlertCircle,
+  CheckCircle2,
+  Copy,
   Download,
   Eye,
   FileArchive,
@@ -135,6 +138,13 @@ type PublicProtocolStatus = {
   status: Status;
   created_at: string;
   updated_at: string;
+};
+
+type ClientSubmissionFeedback = {
+  variant: "success" | "warning" | "error";
+  protocol?: string;
+  title: string;
+  message: string;
 };
 
 const initialForm: SolicitationForm = {
@@ -683,6 +693,8 @@ function App() {
     useState<PublicProtocolStatus | null>(null);
   const [protocolLookupError, setProtocolLookupError] = useState("");
   const [protocolLookupLoading, setProtocolLookupLoading] = useState(false);
+  const [clientSubmissionFeedback, setClientSubmissionFeedback] =
+    useState<ClientSubmissionFeedback | null>(null);
   const [typeFilter, setTypeFilter] = useState("");
   const [areaFilter, setAreaFilter] = useState("");
   const [selectedRecord, setSelectedRecord] =
@@ -727,6 +739,36 @@ function App() {
       "",
       `${tabPaths[tab]}${window.location.search}`,
     );
+  }
+
+  function showClientSubmissionFeedback(feedback: ClientSubmissionFeedback) {
+    setClientSubmissionFeedback(feedback);
+  }
+
+  function closeClientSubmissionFeedback() {
+    setClientSubmissionFeedback(null);
+  }
+
+  async function copyClientProtocol() {
+    if (!clientSubmissionFeedback?.protocol) return;
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(clientSubmissionFeedback.protocol);
+      } else {
+        const copyField = document.createElement("textarea");
+        copyField.value = clientSubmissionFeedback.protocol;
+        copyField.style.position = "fixed";
+        copyField.style.opacity = "0";
+        document.body.appendChild(copyField);
+        copyField.select();
+        document.execCommand("copy");
+        copyField.remove();
+      }
+      setToast("Protocolo copiado.");
+    } catch {
+      setToast("Não foi possível copiar automaticamente.");
+    }
   }
 
   // Mantém URLs limpas e migra automaticamente links antigos baseados em hash.
@@ -1475,13 +1517,21 @@ function App() {
       if (isNewRecord && recordToPersist.type === "client") {
         try {
           await sendClientWebhook(recordToPersist, uploadToken);
-          setToast(
-            `Contato cadastrado e enviado ao Pipefy. Protocolo: ${recordToPersist.protocol}.`,
-          );
+          showClientSubmissionFeedback({
+            variant: "success",
+            protocol: recordToPersist.protocol,
+            title: "Solicitação registrada",
+            message:
+              "Sua solicitação foi registrada e enviada para atendimento.",
+          });
         } catch {
-          setToast(
-            `Contato cadastrado, mas não foi possível enviar ao Pipefy. Protocolo: ${recordToPersist.protocol}.`,
-          );
+          showClientSubmissionFeedback({
+            variant: "warning",
+            protocol: recordToPersist.protocol,
+            title: "Solicitação registrada com aviso",
+            message:
+              "Seu protocolo foi criado, mas houve uma falha no envio. Guarde-o e, se necessário, contate a equipe da Sofico.",
+          });
         }
         return;
       }
@@ -1494,7 +1544,16 @@ function App() {
     } catch (error) {
       console.error("Erro ao salvar solicitação no Supabase:", error);
       const message = getSupabaseErrorMessage(error);
-      setToast(`Não foi possível salvar no Supabase: ${message}`);
+      if (activeTab === "client" && !form.id) {
+        showClientSubmissionFeedback({
+          variant: "error",
+          title: "Não foi dessa vez",
+          message:
+            "Não conseguimos registrar sua solicitação. Tente novamente e, se o erro continuar, contate a equipe da Sofico.",
+        });
+      } else {
+        setToast(`Não foi possível salvar no Supabase: ${message}`);
+      }
     } finally {
       setRecordSaving(false);
     }
@@ -2930,8 +2989,81 @@ function App() {
         </div>
       )}
 
+      {activeTab === "client" && clientSubmissionFeedback && (
+        <aside
+          className={`fixed bottom-5 right-5 z-50 w-[calc(100vw-2.5rem)] max-w-sm rounded-lg border bg-white p-4 shadow-2xl ${
+            clientSubmissionFeedback.variant === "success"
+              ? "border-emerald-200"
+              : clientSubmissionFeedback.variant === "warning"
+                ? "border-amber-200"
+                : "border-red-200"
+          }`}
+        >
+          <div className="flex items-start gap-3">
+            <span
+              className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-white ${
+                clientSubmissionFeedback.variant === "success"
+                  ? "bg-emerald-600"
+                  : clientSubmissionFeedback.variant === "warning"
+                    ? "bg-amber-500"
+                    : "bg-red-600"
+              }`}
+            >
+              {clientSubmissionFeedback.variant === "success" ? (
+                <CheckCircle2 size={19} />
+              ) : (
+                <AlertCircle size={19} />
+              )}
+            </span>
+            <div className="min-w-0 flex-1">
+              <p
+                className={`text-xs font-black uppercase ${
+                  clientSubmissionFeedback.variant === "success"
+                    ? "text-emerald-700"
+                    : clientSubmissionFeedback.variant === "warning"
+                      ? "text-amber-700"
+                      : "text-red-700"
+                }`}
+              >
+                {clientSubmissionFeedback.title}
+              </p>
+              <p className="mt-1 text-xs font-semibold leading-relaxed text-slate-500">
+                {clientSubmissionFeedback.message}
+              </p>
+              {clientSubmissionFeedback.protocol && (
+                <>
+                  <strong className="mt-2 block break-all text-sm font-black text-fi-navy">
+                    {clientSubmissionFeedback.protocol}
+                  </strong>
+                  <button
+                    className="button-secondary mt-3 min-h-9 px-3 text-xs"
+                    type="button"
+                    onClick={copyClientProtocol}
+                  >
+                    <Copy size={15} />
+                    Copiar protocolo
+                  </button>
+                </>
+              )}
+            </div>
+            <button
+              className="icon-button h-8 w-8 shrink-0"
+              type="button"
+              title="Fechar confirmação"
+              onClick={closeClientSubmissionFeedback}
+            >
+              <X size={16} />
+            </button>
+          </div>
+        </aside>
+      )}
+
       <div
-        className={`fixed bottom-5 right-5 z-50 max-w-[calc(100vw-2.5rem)] rounded-lg bg-fi-navy px-4 py-3 text-sm font-extrabold text-white shadow-2xl transition ${
+        className={`fixed right-5 z-50 max-w-[calc(100vw-2.5rem)] rounded-lg bg-fi-navy px-4 py-3 text-sm font-extrabold text-white shadow-2xl transition ${
+          activeTab === "client" && clientSubmissionFeedback
+            ? "bottom-48"
+            : "bottom-5"
+        } ${
           toast
             ? "translate-y-0 opacity-100"
             : "pointer-events-none translate-y-4 opacity-0"
