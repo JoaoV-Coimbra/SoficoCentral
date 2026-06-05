@@ -497,27 +497,25 @@ async function fetchRecordAttachments(protocol: string): Promise<Attachment[]> {
   return attachments;
 }
 
-// Payload JSON esperado pelo Pipefy para abertura de solicitações da Área do Cliente.
-function buildClientWebhookPayload(
+// Payload JSON esperado pelo Pipefy para abertura de solicitações.
+function buildSolicitationWebhookPayload(
   record: SolicitationRecord,
-  uploadToken: string,
+  uploadToken = "",
 ) {
-  return {
-    source: "sofico_area_cliente",
-    event: "client_solicitation_created",
+  const basePayload = {
+    source:
+      record.type === "client"
+        ? "sofico_area_cliente"
+        : "sofico_area_administradora",
+    event:
+      record.type === "client"
+        ? "client_solicitation_created"
+        : "administrator_contact_created",
     protocol: record.protocol,
     type: record.type,
     status: record.status,
-    customer: {
-      name: record.name,
-      email: record.email,
-      phone: record.phone,
-    },
-    condominium: {
-      name: record.condominium,
-      complement: record.complement,
-    },
     request: {
+      area: record.area,
       reason: record.reason,
       description: record.description,
     },
@@ -528,16 +526,42 @@ function buildClientWebhookPayload(
       path: attachment.path,
     })),
     createdAt: record.createdAt,
-    uploadToken,
+  };
+
+  if (record.type === "client") {
+    return {
+      ...basePayload,
+      customer: {
+        name: record.name,
+        email: record.email,
+        phone: record.phone,
+      },
+      condominium: {
+        name: record.condominium,
+        complement: record.complement,
+      },
+      uploadToken,
+    };
+  }
+
+  return {
+    ...basePayload,
+    administrator: {
+      name: record.administrator,
+      email: record.email,
+    },
   };
 }
 
 // Envia somente JSON para a Edge Function; a URL/segredo do Pipefy ficam no servidor.
-async function sendClientWebhook(record: SolicitationRecord, uploadToken: string) {
+async function sendSolicitationWebhook(
+  record: SolicitationRecord,
+  uploadToken = "",
+) {
   const { data, error } = await supabase.functions.invoke(
     "client-solicitation-webhook",
     {
-      body: buildClientWebhookPayload(record, uploadToken),
+      body: buildSolicitationWebhookPayload(record, uploadToken),
     },
   );
 
@@ -853,7 +877,7 @@ function App() {
     setProfileLoading(true);
     supabase
       .from("profiles")
-      .select("id,email,role,administradora")
+      .select("id,email,role,administradora,administrador")
       .eq("id", session.user.id)
       .maybeSingle()
       .then(async ({ data, error }) => {
@@ -861,6 +885,15 @@ function App() {
           const fallback = await supabase
             .from("profiles")
             .select("id,email,role,administrador")
+            .eq("id", session.user.id)
+            .maybeSingle();
+
+          data = fallback.data as unknown as typeof data;
+          error = fallback.error;
+        } else if (error?.message?.includes("administrador")) {
+          const fallback = await supabase
+            .from("profiles")
+            .select("id,email,role,administradora")
             .eq("id", session.user.id)
             .maybeSingle();
 
@@ -1407,6 +1440,38 @@ function App() {
       }
     }
 
+    const lockedAdministrator =
+      activeTab === "administrator" && profile?.role === "administradora"
+        ? profile.administradora || profile.administrador || ""
+        : "";
+
+    if (activeTab === "administrator") {
+      if (
+        !lockedAdministrator &&
+        !form.administrator.trim()
+      ) {
+        setToast("Seu usuário não possui administradora vinculada.");
+        return;
+      }
+
+      if (
+        !form.email.trim() ||
+        !form.area.trim() ||
+        !form.reason.trim() ||
+        !form.description.trim()
+      ) {
+        setToast(
+          "Preencha e-mail, área da Sofico, motivo do contato e descrição do caso.",
+        );
+        return;
+      }
+
+      if (!isValidEmail(form.email)) {
+        setToast("Informe um e-mail válido, como nome@empresa.com.br.");
+        return;
+      }
+    }
+
     const attachmentValidationError = validateAttachments(form.attachments);
 
     if (attachmentValidationError) {
@@ -1435,6 +1500,9 @@ function App() {
         phone: form.phone?.trim() || "",
         condominium: form.condominium?.trim() || "",
         complement: form.complement?.trim() || "",
+        administrator: lockedAdministrator || form.administrator?.trim() || "",
+        area: form.area?.trim() || "",
+        reason: form.reason?.trim() || "",
         description: form.description.trim(),
         createdAt: "createdAt" in form ? form.createdAt || now : now,
         updatedAt: now,
@@ -1514,24 +1582,38 @@ function App() {
 
       resetForm();
 
-      if (isNewRecord && recordToPersist.type === "client") {
+      if (isNewRecord && ["client", "administrator"].includes(recordToPersist.type)) {
         try {
-          await sendClientWebhook(recordToPersist, uploadToken);
-          showClientSubmissionFeedback({
-            variant: "success",
-            protocol: recordToPersist.protocol,
-            title: "Solicitação registrada",
-            message:
-              "Sua solicitação foi registrada e enviada para atendimento.",
-          });
-        } catch {
-          showClientSubmissionFeedback({
-            variant: "warning",
-            protocol: recordToPersist.protocol,
-            title: "Solicitação registrada com aviso",
-            message:
-              "Seu protocolo foi criado, mas houve uma falha no envio. Guarde-o e, se necessário, contate a equipe da Sofico.",
-          });
+          await sendSolicitationWebhook(recordToPersist, uploadToken);
+          if (recordToPersist.type === "client") {
+            showClientSubmissionFeedback({
+              variant: "success",
+              protocol: recordToPersist.protocol,
+              title: "Solicitação registrada",
+              message:
+                "Sua solicitação foi registrada e enviada para atendimento.",
+            });
+          } else {
+            setToast(
+              `Contato cadastrado e enviado ao Pipefy. Protocolo: ${recordToPersist.protocol}.`,
+            );
+          }
+        } catch (error) {
+          const message = getSupabaseErrorMessage(error);
+
+          if (recordToPersist.type === "client") {
+            showClientSubmissionFeedback({
+              variant: "warning",
+              protocol: recordToPersist.protocol,
+              title: "Solicitação registrada com aviso",
+              message:
+                "Seu protocolo foi criado, mas houve uma falha no envio. Guarde-o e, se necessário, contate a equipe da Sofico.",
+            });
+          } else {
+            setToast(
+              `Contato cadastrado, mas houve falha no envio ao Pipefy: ${message}. Protocolo: ${recordToPersist.protocol}.`,
+            );
+          }
         }
         return;
       }
@@ -2188,24 +2270,38 @@ function App() {
                   ) : (
                     <>
                       <label className="field-label">
-                        Selecione sua Administradora
-                  <select
-                    className="field-control"
-                    name="administrator"
-                    value={form.administrator}
-                    onChange={updateField}
-                    disabled={profile?.role === "administradora"}
-                    required
-                  >
-                    <option value="">Selecione</option>
-                    {administrators.map((administrator) => (
-                      <option key={administrator}>{administrator}</option>
-                    ))}
-                  </select>
+                        <span>
+                          Selecione sua Administradora <RequiredHint />
+                        </span>
+                        <select
+                          className="field-control"
+                          name="administrator"
+                          value={
+                            profile?.role === "administradora"
+                              ? currentProfileAdministrator
+                              : form.administrator
+                          }
+                          onChange={updateField}
+                          disabled={profile?.role === "administradora"}
+                          required
+                        >
+                          <option value="">Selecione</option>
+                          {currentProfileAdministrator &&
+                            !administrators.includes(currentProfileAdministrator) && (
+                              <option value={currentProfileAdministrator}>
+                                {currentProfileAdministrator}
+                              </option>
+                            )}
+                          {administrators.map((administrator) => (
+                            <option key={administrator}>{administrator}</option>
+                          ))}
+                        </select>
                       </label>
 
                       <label className="field-label">
-                        E-mail
+                        <span>
+                          E-mail <RequiredHint />
+                        </span>
                         <span className="relative">
                           <Mail
                             className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fi-navy/35"
@@ -2224,7 +2320,9 @@ function App() {
                       </label>
 
                       <label className="field-label">
-                        Área da Sofico contatada
+                        <span>
+                          Área da Sofico contatada <RequiredHint />
+                        </span>
                         <select
                           className="field-control"
                           name="area"
@@ -2240,7 +2338,9 @@ function App() {
                       </label>
 
                       <label className="field-label">
-                        Motivo do contato
+                        <span>
+                          Motivo do contato <RequiredHint />
+                        </span>
                         <select
                           className="field-control"
                           name="reason"
@@ -2260,8 +2360,7 @@ function App() {
 
                 <label className="field-label">
                   <span>
-                    Descrição do caso{" "}
-                    {activeTab === "client" && <RequiredHint />}
+                    Descrição do caso <RequiredHint />
                   </span>
                   <textarea
                     className="field-area"

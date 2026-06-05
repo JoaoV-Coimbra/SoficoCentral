@@ -6,6 +6,10 @@ type ClientWebhookPayload = {
   protocol?: string;
   type?: string;
   status?: string;
+  administrator?: {
+    name?: string;
+    email?: string;
+  };
   customer?: {
     name?: string;
     email?: string;
@@ -16,6 +20,7 @@ type ClientWebhookPayload = {
     complement?: string;
   };
   request?: {
+    area?: string;
     reason?: string;
     description?: string;
   };
@@ -27,6 +32,12 @@ type ClientWebhookPayload = {
   }>;
   createdAt?: string;
   uploadToken?: string;
+};
+
+type CallerProfile = {
+  role?: string | null;
+  administradora?: string | null;
+  administrador?: string | null;
 };
 
 const ATTACHMENTS_BUCKET = "solicitacao-anexos";
@@ -122,33 +133,111 @@ async function sha256Hex(value: string) {
     .join("");
 }
 
-function validatePayload(payload: ClientWebhookPayload) {
+async function getCallerProfile(
+  adminClient: ReturnType<typeof createClient>,
+  authHeader: string | null,
+) {
+  if (!authHeader?.startsWith("Bearer ")) {
+    return null;
+  }
+
+  const token = authHeader.replace("Bearer ", "");
+  const { data: callerData, error: callerError } = await adminClient.auth.getUser(token);
+
+  if (callerError || !callerData.user) {
+    return null;
+  }
+
+  const primary = await adminClient
+    .from("profiles")
+    .select("role,administradora,administrador")
+    .eq("id", callerData.user.id)
+    .maybeSingle();
+
+  if (!primary.error) {
+    return primary.data as CallerProfile | null;
+  }
+
   if (
-    payload.source !== "sofico_area_cliente" ||
-    payload.event !== "client_solicitation_created" ||
-    payload.type !== "client"
+    !primary.error.message.includes("administradora") &&
+    !primary.error.message.includes("administrador")
   ) {
-    return "Payload de solicitação do cliente inválido.";
+    throw primary.error;
+  }
+
+  const fallbackAdministradora = await adminClient
+    .from("profiles")
+    .select("role,administradora")
+    .eq("id", callerData.user.id)
+    .maybeSingle();
+
+  if (!fallbackAdministradora.error) {
+    return fallbackAdministradora.data as CallerProfile | null;
+  }
+
+  const fallback = await adminClient
+    .from("profiles")
+    .select("role,administrador")
+    .eq("id", callerData.user.id)
+    .maybeSingle();
+
+  if (fallback.error) {
+    throw fallback.error;
+  }
+
+  return fallback.data as CallerProfile | null;
+}
+
+function validatePayload(payload: ClientWebhookPayload) {
+  const isClientPayload =
+    payload.source === "sofico_area_cliente" &&
+    payload.event === "client_solicitation_created" &&
+    payload.type === "client";
+  const isAdministratorPayload =
+    payload.source === "sofico_area_administradora" &&
+    payload.event === "administrator_contact_created" &&
+    payload.type === "administrator";
+
+  if (
+    !isClientPayload &&
+    !isAdministratorPayload
+  ) {
+    return "Payload de solicitação inválido.";
   }
 
   if (!isShortText(payload.protocol, 64)) {
     return "Protocolo inválido.";
   }
 
-  if (!isShortText(payload.uploadToken, 128)) {
+  if (isClientPayload && !isShortText(payload.uploadToken, 128)) {
     return "Token da solicitação inválido.";
   }
 
-  if (!isShortText(payload.customer?.name, 255)) {
+  if (isClientPayload && !isShortText(payload.customer?.name, 255)) {
     return "Nome do cliente inválido.";
   }
 
-  if (!isShortText(payload.customer?.email, 320) && !isShortText(payload.customer?.phone, 32)) {
+  if (
+    isClientPayload &&
+    !isShortText(payload.customer?.email, 320) &&
+    !isShortText(payload.customer?.phone, 32)
+  ) {
     return "Informe e-mail ou telefone.";
   }
 
-  if (!isShortText(payload.condominium?.name, 255)) {
+  if (isClientPayload && !isShortText(payload.condominium?.name, 255)) {
     return "Condomínio inválido.";
+  }
+
+  if (
+    isAdministratorPayload &&
+    (
+      !isShortText(payload.administrator?.name, 255) ||
+      !isShortText(payload.administrator?.email, 320) ||
+      !isShortText(payload.request?.area, 255)
+    )
+  ) {
+    return "Administradora, e-mail ou área da Sofico inválidos.";
   }
 
   if (!isShortText(payload.request?.reason, 255) || !isShortText(payload.request?.description)) {
@@ -285,7 +374,7 @@ Deno.serve(async (request) => {
   const { data: record, error: recordError } = await adminClient
     .from("solicitacoes")
     .select(
-      "id, protocolo, tipo, status, nome, email, telefone, condominio, complemento, motivo, descricao, created_at, upload_token_hash, client_webhook_sent_at",
+      "id, protocolo, tipo, status, nome, email, telefone, condominio, complemento, administradora, area, motivo, descricao, created_at, upload_token_hash, client_webhook_sent_at",
     )
     .eq("protocolo", payload.protocol)
     .maybeSingle();
@@ -294,7 +383,7 @@ Deno.serve(async (request) => {
     return jsonResponse({ error: recordError.message }, 500);
   }
 
-  if (!record || record.tipo !== "client") {
+  if (!record || record.tipo !== payload.type) {
     return jsonResponse({ error: "Solicitação do cliente não encontrada." }, 404);
   }
 
@@ -302,27 +391,58 @@ Deno.serve(async (request) => {
     return jsonResponse({ error: "Webhook desta solicitação já foi enviado." }, 409);
   }
 
-  const createdAtMs = Date.parse(record.created_at || "");
+  if (payload.type === "client") {
+    const createdAtMs = Date.parse(record.created_at || "");
 
-  if (!Number.isFinite(createdAtMs) || Date.now() - createdAtMs > PUBLIC_CLIENT_WEBHOOK_WINDOW_MS) {
-    return jsonResponse({ error: "Janela de envio do webhook expirada." }, 403);
-  }
+    if (!Number.isFinite(createdAtMs) || Date.now() - createdAtMs > PUBLIC_CLIENT_WEBHOOK_WINDOW_MS) {
+      return jsonResponse({ error: "Janela de envio do webhook expirada." }, 403);
+    }
 
-  const uploadTokenHash = await sha256Hex(payload.uploadToken || "");
+    const uploadTokenHash = await sha256Hex(payload.uploadToken || "");
 
-  if (!record.upload_token_hash || uploadTokenHash !== record.upload_token_hash) {
-    return jsonResponse({ error: "Token da solicitação inválido." }, 403);
+    if (!record.upload_token_hash || uploadTokenHash !== record.upload_token_hash) {
+      return jsonResponse({ error: "Token da solicitação inválido." }, 403);
+    }
+  } else {
+    let callerProfile: CallerProfile | null = null;
+
+    try {
+      callerProfile = await getCallerProfile(adminClient, request.headers.get("Authorization"));
+    } catch (error) {
+      return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+
+    const role = callerProfile?.role || "";
+    const callerAdministradora = callerProfile?.administradora || callerProfile?.administrador || "";
+    const canSendAdministratorWebhook =
+      ["operador", "admin"].includes(role) ||
+      (
+        role === "administradora" &&
+        record.tipo === "administrator" &&
+        record.administradora === callerAdministradora
+      );
+
+    if (!canSendAdministratorWebhook) {
+      return jsonResponse({ error: "Usuário sem permissão para enviar este contato ao Pipefy." }, 403);
+    }
   }
 
   const payloadMatchesRecord =
-    normalizeText(payload.status) === normalizeText(record.status) &&
-    normalizeText(payload.customer?.name) === normalizeText(record.nome) &&
-    normalizeEmail(payload.customer?.email) === normalizeEmail(record.email) &&
-    normalizeText(payload.customer?.phone) === normalizeText(record.telefone) &&
-    normalizeText(payload.condominium?.name) === normalizeText(record.condominio) &&
-    normalizeText(payload.condominium?.complement) === normalizeText(record.complemento) &&
-    normalizeText(payload.request?.reason) === normalizeText(record.motivo) &&
-    normalizeText(payload.request?.description) === normalizeText(record.descricao);
+    payload.type === "client"
+      ? normalizeText(payload.status) === normalizeText(record.status) &&
+        normalizeText(payload.customer?.name) === normalizeText(record.nome) &&
+        normalizeEmail(payload.customer?.email) === normalizeEmail(record.email) &&
+        normalizeText(payload.customer?.phone) === normalizeText(record.telefone) &&
+        normalizeText(payload.condominium?.name) === normalizeText(record.condominio) &&
+        normalizeText(payload.condominium?.complement) === normalizeText(record.complemento) &&
+        normalizeText(payload.request?.reason) === normalizeText(record.motivo) &&
+        normalizeText(payload.request?.description) === normalizeText(record.descricao)
+      : normalizeText(payload.status) === normalizeText(record.status) &&
+        normalizeText(payload.administrator?.name) === normalizeText(record.administradora) &&
+        normalizeEmail(payload.administrator?.email) === normalizeEmail(record.email) &&
+        normalizeText(payload.request?.area) === normalizeText(record.area) &&
+        normalizeText(payload.request?.reason) === normalizeText(record.motivo) &&
+        normalizeText(payload.request?.description) === normalizeText(record.descricao);
 
   if (!payloadMatchesRecord) {
     return jsonResponse({ error: "Payload não confere com a solicitação salva." }, 400);
@@ -352,8 +472,15 @@ Deno.serve(async (request) => {
   });
 
   if (!response.ok) {
+    const responseText = await response.text().catch(() => "");
+    const responseMessage = responseText
+      ? `Webhook Pipefy respondeu com status ${response.status}: ${responseText.slice(0, 1000)}`
+      : `Webhook Pipefy respondeu com status ${response.status}.`;
+
+    console.error(responseMessage);
+
     return jsonResponse(
-      { error: `Webhook Pipefy respondeu com status ${response.status}.` },
+      { error: responseMessage },
       502,
     );
   }

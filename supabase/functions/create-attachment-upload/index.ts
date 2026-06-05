@@ -137,7 +137,7 @@ async function getCallerProfile(
 
   const primary = await adminClient
     .from("profiles")
-    .select("role,administradora")
+    .select("role,administradora,administrador")
     .eq("id", callerData.user.id)
     .maybeSingle();
 
@@ -145,8 +145,21 @@ async function getCallerProfile(
     return primary.data as CallerProfile | null;
   }
 
-  if (!primary.error.message.includes("administradora")) {
+  if (
+    !primary.error.message.includes("administradora") &&
+    !primary.error.message.includes("administrador")
+  ) {
     throw primary.error;
+  }
+
+  const fallbackAdministradora = await adminClient
+    .from("profiles")
+    .select("role,administradora")
+    .eq("id", callerData.user.id)
+    .maybeSingle();
+
+  if (!fallbackAdministradora.error) {
+    return fallbackAdministradora.data as CallerProfile | null;
   }
 
   const fallback = await adminClient
