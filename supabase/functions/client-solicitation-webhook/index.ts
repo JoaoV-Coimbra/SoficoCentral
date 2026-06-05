@@ -480,7 +480,7 @@ Deno.serve(async (request) => {
     console.error(responseMessage);
 
     return jsonResponse(
-      { error: responseMessage },
+      { error: `Webhook Pipefy respondeu com status ${response.status}.` },
       502,
     );
   }
