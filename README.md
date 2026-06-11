@@ -38,6 +38,11 @@ npm run build
 npm run preview
 ```
 
+## Docker
+
+Os arquivos de Docker rodam apenas o front-end estatico em Nginx e nao alteram
+o fluxo atual da Vercel. Veja [docs/docker.md](docs/docker.md).
+
 ## Páginas
 
 A aplicação possui URLs próprias para cada área:

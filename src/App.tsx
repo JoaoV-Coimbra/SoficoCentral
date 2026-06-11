@@ -165,6 +165,7 @@ const initialForm: SolicitationForm = {
 };
 
 const administrators = [
+  "Sofico",
   "Habitacional",
   "Semog",
   "Controlar",
